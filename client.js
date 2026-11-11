@@ -139,6 +139,10 @@ const 界面 = {
   已请求抬秒: false,
   /** 正在取消中的任务 id，避免重复点 */
   取消中: new Set(),
+  /** 「立即重启」的二次确认状态：点一次变成确认，3 秒不点自动复原 */
+  立即确认: false,
+  立即确认定时器: null,
+  立即中: false,
   错误: '',
 }
 
@@ -261,6 +265,45 @@ function 画(状态) {
   脚.appendChild(元素('span', null, 界面.错误 || '每个任务都能单独取消；取消会给你发一条反馈。'))
   const 撑 = 元素('span', 'dsr-spacer')
   脚.appendChild(撑)
+  const 立即按钮 = 元素(
+    'button',
+    'dsr-btn dsr-danger',
+    界面.立即中 ? '重启中…' : 界面.立即确认 ? '再点一次：立即重启' : '立即重启',
+  )
+  立即按钮.type = 'button'
+  立即按钮.disabled = 界面.立即中
+  立即按钮.title = '跳过等待和倒计时，马上重启；会中断正在运行的会话，重启后会话会被唤醒。'
+  立即按钮.addEventListener('click', () => {
+    if (界面.立即中) return
+    if (!界面.立即确认) {
+      界面.立即确认 = true
+      if (界面.立即确认定时器) clearTimeout(界面.立即确认定时器)
+      界面.立即确认定时器 = setTimeout(() => {
+        界面.立即确认 = false
+        界面.立即确认定时器 = null
+        画(界面.上次快照)
+      }, 3000)
+      画(界面.上次快照)
+      return
+    }
+    if (界面.立即确认定时器) {
+      clearTimeout(界面.立即确认定时器)
+      界面.立即确认定时器 = null
+    }
+    界面.立即确认 = false
+    界面.立即中 = true
+    立即按钮.textContent = '重启中…'
+    立即按钮.disabled = true
+    void 请求('/now', { method: 'POST' }).then((结果) => {
+      if (!结果 || 结果.ok !== true) {
+        界面.立即中 = false
+        界面.立即确认 = false
+        界面.错误 = String(结果?.error || '立即重启失败')
+        画(界面.上次快照)
+      }
+    })
+  })
+  脚.appendChild(立即按钮)
   const 收起按钮 = 元素('button', 'dsr-btn', '收起')
   收起按钮.type = 'button'
   收起按钮.addEventListener('click', () => 收起())

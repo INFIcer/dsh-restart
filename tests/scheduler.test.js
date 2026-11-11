@@ -480,6 +480,45 @@ test('坏会话数据不会让调度器崩', async () => {
   assert.equal(上下文.调度器.tasks[0].remainingMs, 10000)
 })
 
+test('立即重启：有会话在跑也直接触发，不等空闲与倒计时', async () => {
+  const 上下文 = 造调度器()
+  设忙碌(上下文, ['session-a'])
+  排任务(上下文.调度器, { sessionId: 'session-a' })
+  await 上下文.调度器.tick()
+  assert.equal(上下文.调度器.phase, 'waiting')
+  const 结果 = await 上下文.调度器.立即重启()
+  assert.equal(结果.ok, true)
+  assert.equal(结果.立即, true)
+  assert.equal(上下文.记录.触发.length, 1)
+  assert.deepEqual(上下文.记录.触发[0].sessionIds, ['session-a'])
+  assert.equal(上下文.调度器.tasks.length, 0)
+})
+
+test('立即重启：没有任务时拒绝', async () => {
+  const 上下文 = 造调度器()
+  const 结果 = await 上下文.调度器.立即重启()
+  assert.equal(结果.ok, false)
+  assert.equal(结果.code, 'no_tasks')
+})
+
+test('立即重启：已经在重启时拒绝', async () => {
+  const 上下文 = 造调度器()
+  排任务(上下文.调度器)
+  上下文.调度器.firing = true
+  const 结果 = await 上下文.调度器.立即重启()
+  assert.equal(结果.ok, false)
+  assert.equal(结果.code, 'firing')
+})
+
+test('立即重启：触发失败时返回错误、清空任务并记 fire-failed', async () => {
+  const 上下文 = 造调度器({ onFire: async () => ({ ok: false, error: 'boom' }) })
+  排任务(上下文.调度器)
+  const 结果 = await 上下文.调度器.立即重启()
+  assert.equal(结果.ok, false)
+  assert.equal(上下文.调度器.tasks.length, 0)
+  assert.equal(上下文.调度器.lastRestart.status, 'fire-failed')
+})
+
 test('时钟工具：假时钟可推进', () => {
   const 时钟 = 造时钟(1000)
   assert.equal(时钟.now(), 1000)

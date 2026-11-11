@@ -168,12 +168,13 @@ function 取工具(ctx) {
 
 // ———————————————————————— 注册与契约 ————————————————————————
 
-test('装配：注册 5 条 exact 路由', (t) => {
+test('装配：注册 6 条 exact 路由', (t) => {
   const { ctx } = 造插件(t)
   const 路径 = ctx.路由.map((项) => 项.path).sort()
   assert.deepEqual(路径, [
     `${路由前缀}/cancel`,
     `${路由前缀}/dialog-open`,
+    `${路由前缀}/now`,
     `${路由前缀}/pause`,
     `${路由前缀}/resume`,
     `${路由前缀}/state`,
@@ -181,8 +182,28 @@ test('装配：注册 5 条 exact 路由', (t) => {
   for (const 项 of ctx.路由) assert.equal(项.kind, 'exact')
 })
 
-test('装配：注册 dsh_restart 工具', (t) => {
+test('路由 /now：没有任务时回 400 no_tasks', async (t) => {
   const { ctx } = 造插件(t)
+  const res = await 调路由(ctx, '/now', 假请求('POST'))
+  assert.equal(res.statusCode, 400)
+  const 体 = JSON.parse(res.体)
+  assert.equal(体.ok, false)
+  assert.equal(体.code, 'no_tasks')
+})
+
+test('路由 /now：有任务时立刻触发并回空快照', async (t) => {
+  const { ctx, 触发, 插件 } = 造插件(t)
+  插件.调度器.排任务({ sessionId: 'session-a', delaySeconds: 600, reason: '按钮测试' })
+  const res = await 调路由(ctx, '/now', 假请求('POST'))
+  assert.equal(res.statusCode, 200)
+  const 体 = JSON.parse(res.体)
+  assert.equal(体.ok, true)
+  assert.equal(体.立即, true)
+  assert.equal(触发.length, 1)
+  assert.equal(体.快照.tasks.length, 0)
+})
+
+test('装配：注册 dsh_restart 工具', (t) => {  const { ctx } = 造插件(t)
   const 工具 = 取工具(ctx)
   assert.notEqual(工具, undefined)
   assert.equal(工具.name, 'dsh_restart')
