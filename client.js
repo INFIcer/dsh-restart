@@ -222,8 +222,9 @@ function 画(状态) {
     头部行.style.display = 'flex'
     头部行.style.gap = '8px'
     头部行.style.alignItems = 'baseline'
-    头部行.appendChild(元素('span', 'dsr-who', 任务.sessionLabel || 任务.sessionId || '未知会话'))
-    头部行.appendChild(元素('span', 'dsr-session', String(任务.id || '').replace(/^restart-/, '').slice(0, 8)))
+    头部行.appendChild(元素('span', 'dsr-who', 任务.sessionLabel || '未知会话'))
+    const 会话短码 = String(任务.sessionId || '').replace(/^session-/, '').slice(0, 6)
+    if (任务.sessionLabel && 会话短码) 头部行.appendChild(元素('span', 'dsr-session', `（${会话短码}）`))
     主.appendChild(头部行)
     const 说明 = 任务.reason || 任务.wakeText || '没有备注'
     主.appendChild(元素('div', 'dsr-why', 说明))
