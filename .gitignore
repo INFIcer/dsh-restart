@@ -1,0 +1,5 @@
+node_modules/
+restart.ps1
+restart.log
+restart-plugin.log
+*.tmp

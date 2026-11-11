@@ -1,0 +1,5 @@
+# dsh-restart-plugin：DSH 重启调度
+# 这一层只负责把插件插进 profile；运行状态在 C:\Users\Administrator\.dsh\restart-scheduler.json。
+- insert:
+    - id: dsh-restart-plugin
+      name: 'dsh-restart-plugin'
