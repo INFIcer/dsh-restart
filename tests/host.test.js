@@ -86,7 +86,12 @@ function 造假ctx(选项 = {}) {
     注入记录,
     get: (名) => {
       if (名 === 'agents') return 选项.agents === undefined ? agents : 选项.agents
-      if (名 === 'sessionTitle') return { get: (id) => 标题[id] || '' }
+      if (名 === 'sessions') {
+        return {
+          get: (id) => (会话状态.has(id) || 标题[id] ? { id } : undefined),
+        }
+      }
+      if (名 === 'sessionTitle') return { get: (会话) => (会话 ? 标题[会话.id] || '' : '') }
       return undefined
     },
     webServer: {
@@ -533,4 +538,26 @@ test('会话标签：有标题用标题，没有就截 id', () => {
   assert.equal(会话标签(ctx, 'session-abcdef123456'), '修插件')
   assert.equal(会话标签(ctx, 'session-zzzzyyyyxxxx'), 'zzzzyyyy')
   assert.equal(会话标签(ctx, ''), '')
+})
+
+test('会话标签：sessionTitle 的 get 收会话对象，标题按 Session 换出来', () => {
+  const ctx = 造假ctx({
+    会话状态: [['session-live0001', 'running']],
+    标题: { 'session-live0001': '大肥鱼聊天' },
+  })
+  assert.equal(会话标签(ctx, 'session-live0001'), '大肥鱼聊天')
+})
+
+test('会话标签：sessions 取不到时退回 agents 里的 session', () => {
+  const agents = {
+    get: (id) => (id === 'session-only-agent' ? { id: 'agent-x', session: { id } } : null),
+  }
+  const ctx = {
+    get: (名) => {
+      if (名 === 'agents') return agents
+      if (名 === 'sessionTitle') return { get: (会话) => (会话.id === 'session-only-agent' ? '只有代理能拿到' : '') }
+      return undefined
+    },
+  }
+  assert.equal(会话标签(ctx, 'session-only-agent'), '只有代理能拿到')
 })
