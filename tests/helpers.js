@@ -1,124 +1,124 @@
 // 测试公共工具：假时钟、假会话、假触发。测试里绝不真的重启。
 
-import { 重启调度器 } from '../lib/scheduler.js'
+import { RestartScheduler } from '../lib/scheduler.js'
 import { EventEmitter } from 'node:events'
 
 /** 可控假时钟。 */
-export function 造时钟(起点 = 0) {
-  const 时钟 = {
-    值: 起点,
-    now: () => 时钟.值,
-    走(毫秒) {
-      时钟.值 += Number(毫秒) || 0
-      return 时钟.值
+export function makeClock(startAt = 0) {
+  const clock = {
+    value: startAt,
+    now: () => clock.value,
+    advance(ms) {
+      clock.value += Number(ms) || 0
+      return clock.value
     },
-    到(时间戳) {
-      时钟.值 = Number(时间戳) || 0
-      return 时钟.值
+    setTo(timestamp) {
+      clock.value = Number(timestamp) || 0
+      return clock.value
     },
   }
-  return 时钟
+  return clock
 }
 
 /**
  * 造一个注入了全部假依赖的调度器。
- * @param {object} 选项 {时钟, 忙碌, 标记, 状态, onFire, 注入成功}
+ * @param {object} options {clock, busy, marker, state, onFire, injectOk}
  */
-export function 造调度器(选项 = {}) {
-  const 时钟 = 选项.时钟 || 造时钟(0)
-  const 忙碌 = { 列表: Array.isArray(选项.忙碌) ? 选项.忙碌 : [] }
-  const 记录 = {
-    落盘: [],
-    注入: [],
-    触发: [],
-    标记: 选项.标记 ?? null,
-    日志: [],
+export function makeScheduler(options = {}) {
+  const clock = options.clock || makeClock(0)
+  const busy = { list: Array.isArray(options.busy) ? options.busy : [] }
+  const record = {
+    persist: [],
+    inject: [],
+    fire: [],
+    marker: options.marker ?? null,
+    log: [],
   }
-  // 磁盘状态默认补上当前结构版本，避免每个用例都手写；显式传 版本 时保留原值（测版本不兼容）。
-  let 磁盘状态 =
-    选项.状态 && typeof 选项.状态 === 'object' ? { 版本: 1, ...选项.状态 } : 选项.状态 ?? null
+  // 磁盘状态默认补上当前结构版本，避免每个用例都手写；显式传 version 时保留原值（测版本不兼容）。
+  let stateOnDisk =
+    options.state && typeof options.state === 'object' ? { version: 1, ...options.state } : options.state ?? null
 
-  const 调度器 = new 重启调度器({
-    now: () => 时钟.值,
-    getBusySessions: () => 忙碌.列表,
-    persist: (状态) => {
-      记录.落盘.push(状态)
-      磁盘状态 = 状态
+  const scheduler = new RestartScheduler({
+    now: () => clock.value,
+    getBusySessions: () => busy.list,
+    persist: (state) => {
+      record.persist.push(state)
+      stateOnDisk = state
     },
-    load: () => 磁盘状态,
-    readMarker: () => 记录.标记,
+    load: () => stateOnDisk,
+    readMarker: () => record.marker,
     onFire:
-      选项.onFire ||
-      (async (载荷) => {
-        记录.触发.push(载荷)
+      options.onFire ||
+      (async (payload) => {
+        record.fire.push(payload)
         return {
           ok: true,
           scriptPath: 'C:\\fake\\restart.ps1',
           launcher: 'schtasks',
-          wakeCount: (载荷?.sessionIds || []).length,
+          wakeCount: (payload?.sessionIds || []).length,
         }
       }),
-    injectToSession: (会话, 文本, 元信息) => {
-      记录.注入.push({ 会话, 文本, 元信息 })
-      return 选项.注入成功 !== false
+    injectToSession: (session, text, meta) => {
+      record.inject.push({ session, text, meta })
+      return options.injectOk !== false
     },
     logger: {
-      info: (...参数) => 记录.日志.push(['info', ...参数]),
-      warn: (...参数) => 记录.日志.push(['warn', ...参数]),
-      error: (...参数) => 记录.日志.push(['error', ...参数]),
+      info: (...params) => record.log.push(['info', ...params]),
+      warn: (...params) => record.log.push(['warn', ...params]),
+      error: (...params) => record.log.push(['error', ...params]),
     },
   })
 
-  return { 调度器, 时钟, 忙碌, 记录, 取磁盘状态: () => 磁盘状态 }
+  return { scheduler, clock, busy, record, getDiskState: () => stateOnDisk }
 }
 
 /** 安排一批"正在运行"的会话。 */
-export function 设忙碌(上下文, 会话列表 = []) {
-  上下文.忙碌.列表 = 会话列表.map((会话) => ({ sessionId: 会话, status: 'running' }))
+export function setBusy(context, sessionList = []) {
+  context.busy.list = sessionList.map((session) => ({ sessionId: session, status: 'running' }))
 }
 
 /** 排队任务的简写。 */
-export function 排任务(调度器, 覆盖 = {}) {
-  return 调度器.排任务({
+export function scheduleTask(scheduler, override = {}) {
+  return scheduler.scheduleTask({
     sessionId: 'session-a',
     sessionLabel: '会话 A',
     delaySeconds: 10,
     reason: '测试重启',
-    ...覆盖,
+    ...override,
   })
 }
 
 /**
  * 假 spawn：按调用顺序返回预设行为。
- * 行为：{code, stdout, stderr, 抛错, 超时, 结束后杀}
+ * 行为：{code, stdout, stderr, throwError, timedOut}
  */
-export function 造假spawn(行为列表) {
-  const 调用 = []
-  const 函数 = (可执行, 参数, 选项) => {
-    const 序号 = 调用.length
-    调用.push({ 可执行, 参数, 选项 })
-    const 行为 = 行为列表[Math.min(序号, 行为列表.length - 1)] || { code: 0 }
-    const 进程 = new EventEmitter()
-    进程.stdout = new EventEmitter()
-    进程.stderr = new EventEmitter()
-    进程.killed = false
-    进程.kill = () => {
-      进程.killed = true
-      setImmediate(() => 进程.emit('close', null))
+export function makeFakeSpawn(behaviorList) {
+  const calls = []
+  const fn = (executable, params, options) => {
+    const index = calls.length
+    calls.push({ executable, params, options })
+    const behavior = behaviorList[Math.min(index, behaviorList.length - 1)] || { code: 0 }
+    const processRef = new EventEmitter()
+    processRef.stdout = new EventEmitter()
+    processRef.stderr = new EventEmitter()
+    processRef.killed = false
+    processRef.kill = () => {
+      processRef.killed = true
+      setImmediate(() => processRef.emit('close', null))
     }
     setImmediate(() => {
-      if (进程.killed) return
-      if (行为.抛错) {
-        进程.emit('error', new Error(行为.抛错))
+      if (processRef.killed) return
+      if (behavior.throwError) {
+        processRef.emit('error', new Error(behavior.throwError))
         return
       }
-      if (行为.超时) return
-      if (行为.stdout) 进程.stdout.emit('data', 行为.stdout)
-      if (行为.stderr) 进程.stderr.emit('data', 行为.stderr)
-      进程.emit('close', 行为.code ?? 0)
+      if (behavior.timedOut) return
+      if (behavior.stdout) processRef.stdout.emit('data', behavior.stdout)
+      if (behavior.stderr) processRef.stderr.emit('data', behavior.stderr)
+      processRef.emit('close', behavior.code ?? 0)
     })
-    return 进程
+    return processRef
   }
-  函数.调用 = 调用
-  return 函数
+  fn.calls = calls
+  return fn
 }

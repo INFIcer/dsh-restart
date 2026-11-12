@@ -7,11 +7,11 @@ import path from 'node:path'
 import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
 
-const 客户端路径 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'client.js')
+const clientPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'client.js')
 
-function 造节点(标签) {
+function makeNode(label) {
   return {
-    标签Name: 标签,
+    labelName: label,
     id: '',
     className: '',
     textContent: '',
@@ -19,45 +19,45 @@ function 造节点(标签) {
     style: {},
     children: [],
     parentNode: null,
-    属性: {},
-    监听: {},
+    attrs: {},
+    listeners: {},
     classList: {
-      列表: new Set(),
-      add(...名字) { for (const 名 of 名字) this.列表.add(名) },
-      remove(...名字) { for (const 名 of 名字) this.列表.delete(名) },
-      toggle(名, 开) { if (开) this.列表.add(名); else this.列表.delete(名) },
-      contains(名) { return this.列表.has(名) },
+      list: new Set(),
+      add(...names) { for (const itemName of names) this.list.add(itemName) },
+      remove(...names) { for (const itemName of names) this.list.delete(itemName) },
+      toggle(itemName, enabled) { if (enabled) this.list.add(itemName); else this.list.delete(itemName) },
+      contains(itemName) { return this.list.has(itemName) },
     },
-    setAttribute(名, 值) { this.属性[名] = String(值) },
-    appendChild(子) { 子.parentNode = this; this.children.push(子); return 子 },
-    removeChild(子) {
-      const 序号 = this.children.indexOf(子)
-      if (序号 >= 0) this.children.splice(序号, 1)
-      子.parentNode = null
-      return 子
+    setAttribute(itemName, value) { this.attrs[itemName] = String(value) },
+    appendChild(childEl) { childEl.parentNode = this; this.children.push(childEl); return childEl },
+    removeChild(childEl) {
+      const index = this.children.indexOf(childEl)
+      if (index >= 0) this.children.splice(index, 1)
+      childEl.parentNode = null
+      return childEl
     },
-    addEventListener(类型, 处理) { (this.监听[类型] || (this.监听[类型] = [])).push(处理) },
-    removeEventListener(类型, 处理) {
-      const 列表 = this.监听[类型]
-      if (!列表) return
-      const 序号 = 列表.indexOf(处理)
-      if (序号 >= 0) 列表.splice(序号, 1)
+    addEventListener(type, handler) { (this.listeners[type] || (this.listeners[type] = [])).push(handler) },
+    removeEventListener(type, handler) {
+      const list = this.listeners[type]
+      if (!list) return
+      const index = list.indexOf(handler)
+      if (index >= 0) list.splice(index, 1)
     },
   }
 }
 
-function 造页面() {
-  const head = 造节点('head')
-  const body = 造节点('body')
-  const documentElement = 造节点('html')
-  const 文档监听 = {}
-  const 窗口监听 = {}
+function makePage() {
+  const head = makeNode('head')
+  const body = makeNode('body')
+  const documentElement = makeNode('html')
+  const docListeners = {}
+  const winListeners = {}
 
-  function 找(根, id) {
-    if (根.id === id) return 根
-    for (const 子 of 根.children) {
-      const 命中 = 找(子, id)
-      if (命中) return 命中
+  function find(rootEl, id) {
+    if (rootEl.id === id) return rootEl
+    for (const childEl of rootEl.children) {
+      const found = find(childEl, id)
+      if (found) return found
     }
     return null
   }
@@ -67,101 +67,101 @@ function 造页面() {
     body,
     documentElement,
     hidden: false,
-    createElement: (标签) => 造节点(标签),
-    getElementById: (id) => 找(head, id) || 找(body, id) || 找(documentElement, id),
-    addEventListener(类型, 处理) { (文档监听[类型] || (文档监听[类型] = [])).push(处理) },
-    removeEventListener(类型, 处理) {
-      const 列表 = 文档监听[类型]
-      if (!列表) return
-      const 序号 = 列表.indexOf(处理)
-      if (序号 >= 0) 列表.splice(序号, 1)
+    createElement: (label) => makeNode(label),
+    getElementById: (id) => find(head, id) || find(body, id) || find(documentElement, id),
+    addEventListener(type, handler) { (docListeners[type] || (docListeners[type] = [])).push(handler) },
+    removeEventListener(type, handler) {
+      const list = docListeners[type]
+      if (!list) return
+      const index = list.indexOf(handler)
+      if (index >= 0) list.splice(index, 1)
     },
   }
 
-  let 已注册模块 = null
+  let registeredModule = null
   const window = {
-    addEventListener(类型, 处理) { (窗口监听[类型] || (窗口监听[类型] = [])).push(处理) },
-    removeEventListener(类型, 处理) {
-      const 列表 = 窗口监听[类型]
-      if (!列表) return
-      const 序号 = 列表.indexOf(处理)
-      if (序号 >= 0) 列表.splice(序号, 1)
+    addEventListener(type, handler) { (winListeners[type] || (winListeners[type] = [])).push(handler) },
+    removeEventListener(type, handler) {
+      const list = winListeners[type]
+      if (!list) return
+      const index = list.indexOf(handler)
+      if (index >= 0) list.splice(index, 1)
     },
     __ModuleLoader__: {
       load({ id, factory }) {
         assert.equal(id, 'dsh-restart-plugin')
-        已注册模块 = factory()
+        registeredModule = factory()
       },
     },
   }
 
-  return { document, window, 文档监听, 窗口监听, 取模块: () => 已注册模块 }
+  return { document, window, docListeners, winListeners, getModule: () => registeredModule }
 }
 
-function 起客户端(页面, 计数) {
-  const 沙箱 = {
-    document: 页面.document,
-    window: 页面.window,
+function startClient(page, counter) {
+  const sandbox = {
+    document: page.document,
+    window: page.window,
     console,
     setTimeout,
     clearTimeout,
     setInterval,
     clearInterval,
     fetch: async () => {
-      计数.value += 1
+      counter.value += 1
       return {
         status: 200,
         text: async () => JSON.stringify({ ok: true, phase: 'idle', tasks: [], paused: false, busyCount: 0 }),
       }
     },
   }
-  vm.runInNewContext(fs.readFileSync(客户端路径, 'utf8'), 沙箱, { filename: 客户端路径 })
-  return 页面.取模块()
+  vm.runInNewContext(fs.readFileSync(clientPath, 'utf8'), sandbox, { filename: clientPath })
+  return page.getModule()
 }
 
-function 等(毫秒) {
-  return new Promise((兑现) => setTimeout(兑现, 毫秒))
+function sleep(ms) {
+  return new Promise((fulfill) => setTimeout(fulfill, ms))
 }
 
 test('client：apply 挂全局监听，dispose 后全部摘掉并可干净重装', async () => {
-  const 页面 = 造页面()
-  const 计数 = { value: 0 }
-  const 模块 = 起客户端(页面, 计数)
-  assert.equal(模块.name, 'dsh-restart-plugin')
-  assert.ok(Array.isArray(模块.inject))
+  const page = makePage()
+  const counter = { value: 0 }
+  const mod = startClient(page, counter)
+  assert.equal(mod.name, 'dsh-restart-plugin')
+  assert.ok(Array.isArray(mod.inject))
 
-  const 清理 = []
-  const ctx = { effect: (工厂) => { 清理.push(工厂()) } }
-  模块.apply(ctx)
-  await 等(30)
+  const cleanup = []
+  const ctx = { effect: (factory) => { cleanup.push(factory()) } }
+  mod.apply(ctx)
+  await sleep(30)
 
-  assert.equal(页面.文档监听.mousemove.length, 1)
-  assert.equal(页面.窗口监听.blur.length, 1)
-  assert.ok(页面.document.getElementById('dsr-overlay'))
-  assert.ok(页面.document.getElementById('dsr-badge'))
-  assert.ok(页面.document.getElementById('dsr-style'))
-  assert.ok(计数.value >= 1)
+  assert.equal(page.docListeners.mousemove.length, 1)
+  assert.equal(page.winListeners.blur.length, 1)
+  assert.ok(page.document.getElementById('dsr-overlay'))
+  assert.ok(page.document.getElementById('dsr-badge'))
+  assert.ok(page.document.getElementById('dsr-style'))
+  assert.ok(counter.value >= 1)
 
-  for (const 清理函数 of 清理) 清理函数()
+  for (const disposeFn of cleanup) disposeFn()
 
-  assert.equal(页面.文档监听.mousemove.length, 0)
-  assert.equal(页面.窗口监听.blur.length, 0)
-  assert.equal(页面.document.getElementById('dsr-overlay'), null)
-  assert.equal(页面.document.getElementById('dsr-badge'), null)
-  assert.equal(页面.document.getElementById('dsr-style'), null)
+  assert.equal(page.docListeners.mousemove.length, 0)
+  assert.equal(page.winListeners.blur.length, 0)
+  assert.equal(page.document.getElementById('dsr-overlay'), null)
+  assert.equal(page.document.getElementById('dsr-badge'), null)
+  assert.equal(page.document.getElementById('dsr-style'), null)
 
   // 轮询确实停了：再过两个轮询周期，请求数不再增长。
-  const 卸载后请求数 = 计数.value
-  await 等(600)
-  assert.equal(计数.value, 卸载后请求数)
+  const requestsAfterDispose = counter.value
+  await sleep(600)
+  assert.equal(counter.value, requestsAfterDispose)
 
   // 装配标记已复位，同一个模块对象可以再装一次，监听仍然只有一份。
-  const 清理2 = []
-  模块.apply({ effect: (工厂) => { 清理2.push(工厂()) } })
-  await 等(30)
-  assert.equal(页面.文档监听.mousemove.length, 1)
-  assert.equal(页面.窗口监听.blur.length, 1)
-  assert.ok(页面.document.getElementById('dsr-overlay'))
-  for (const 清理函数 of 清理2) 清理函数()
-  assert.equal(页面.文档监听.mousemove.length, 0)
+  const cleanup2 = []
+  mod.apply({ effect: (factory) => { cleanup2.push(factory()) } })
+  await sleep(30)
+  assert.equal(page.docListeners.mousemove.length, 1)
+  assert.equal(page.winListeners.blur.length, 1)
+  assert.ok(page.document.getElementById('dsr-overlay'))
+  for (const disposeFn of cleanup2) disposeFn()
+  assert.equal(page.docListeners.mousemove.length, 0)
 })
