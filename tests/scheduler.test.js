@@ -461,43 +461,135 @@ test('初始化：有 restarted 标记时把上次重启记为已重启', () => 
   assert.equal(context.scheduler.bootRecord.marker, 'restarted')
 })
 
-test('初始化：标记是 started 时记为未确认', () => {
+test('初始化：标记还是 launched 时继续轮询，等到 restarted 就确认', () => {
+  // 新实例先起来、脚本 3 秒后才把标记改成 restarted；此时必须继续等，而不是立刻判未确认。
   const context = makeScheduler({
-    state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
-    marker: { status: 'started' },
+    state: { tasks: [], lastRestart: { id: 'r1', status: 'firing', sessionIds: ['s1'] } },
+    marker: { status: 'launched', at: '2026-11-12T15:22:37.000Z' },
   })
   context.scheduler.init()
-  assert.equal(context.scheduler.lastRestart.status, 'restarted-unconfirmed')
+  assert.equal(context.scheduler.lastRestart.status, 'firing')
+  assert.equal(context.scheduler.bootRecord.marker, 'launched')
+  assert.equal(context.scheduler.bootRecord.confirmed, false)
+  assert.equal(context.timers.pendingCount(), 1)
+
+  context.record.marker = {
+    status: 'restarted',
+    ready: true,
+    pid: 32816,
+    ports: [2829],
+    readyAt: '2026-11-12T15:22:40.549Z',
+  }
+  context.timers.advance(600)
+
+  assert.equal(context.scheduler.lastRestart.status, 'restarted')
+  assert.equal(context.scheduler.lastRestart.ready, true)
+  assert.equal(context.scheduler.bootRecord.marker, 'restarted')
+  assert.equal(context.scheduler.bootRecord.confirmed, true)
+  // 确认成功必须补排开机汇报。
+  assert.equal(context.record.bootConfirmed.length, 1)
+  assert.equal(context.timers.pendingCount(), 0)
 })
 
-test('初始化：没有标记时记为 unknown', () => {
+test('初始化：标记一直不变时超时后记为未确认', () => {
+  const context = makeScheduler({
+    state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
+    marker: { status: 'launched' },
+  })
+  context.scheduler.init()
+  assert.equal(context.scheduler.lastRestart.status, 'firing')
+
+  context.timers.advance(restartConfirmTimeoutMs)
+
+  assert.equal(context.scheduler.lastRestart.status, 'restarted-unconfirmed')
+  assert.equal(context.scheduler.bootRecord.confirmed, false)
+  assert.equal(context.timers.pendingCount(), 0)
+  assert.equal(context.record.bootConfirmed.length, 0)
+})
+
+test('初始化：没有标记时超时后记为 unknown', () => {
   const context = makeScheduler({
     state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
     marker: null,
   })
   context.scheduler.init()
+  assert.equal(context.scheduler.lastRestart.status, 'firing')
+  context.timers.advance(restartConfirmTimeoutMs)
   assert.equal(context.scheduler.lastRestart.status, 'unknown')
+  assert.equal(context.scheduler.bootRecord.marker, null)
 })
 
-test('初始化：标记 launch-failed 时保留失败原因', () => {
+test('初始化：标记 launch-failed 时当场保留失败原因', () => {
   const context = makeScheduler({
     state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
     marker: { status: 'launch-failed' },
   })
   context.scheduler.init()
   assert.equal(context.scheduler.lastRestart.status, 'launch-failed')
+  assert.equal(context.timers.pendingCount(), 0)
 })
 
-test('初始化：标记 restarted 但未就绪不算重启成功', () => {
+test('初始化：restarted 但未就绪时继续等，超时后才记为未确认', () => {
   const context = makeScheduler({
     state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
     marker: { status: 'restarted', ready: false, pid: 35412, ports: [], at: '2026-11-12T14:39:46.291Z' },
   })
   context.scheduler.init()
+  assert.equal(context.scheduler.lastRestart.status, 'firing')
+  assert.equal(context.scheduler.bootRecord.marker, 'restarted')
+
+  context.timers.advance(restartConfirmTimeoutMs)
+
   assert.equal(context.scheduler.lastRestart.status, 'restarted-unconfirmed')
   assert.notEqual(context.scheduler.lastRestart.ready, true)
   assert.equal(context.scheduler.bootRecord.confirmed, false)
   assert.equal(context.scheduler.bootRecord.marker, 'restarted')
+})
+
+test('初始化：轮询中途变 stop-failed 记为停不掉旧实例', () => {
+  const context = makeScheduler({
+    state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
+    marker: { status: 'started' },
+  })
+  context.scheduler.init()
+  assert.equal(context.scheduler.lastRestart.status, 'firing')
+
+  context.record.marker = { status: 'stop-failed' }
+  context.timers.advance(500)
+
+  assert.equal(context.scheduler.lastRestart.status, 'stop-failed')
+  assert.equal(context.scheduler.bootRecord.confirmed, false)
+  assert.equal(context.timers.pendingCount(), 0)
+})
+
+test('初始化：轮询中途变 launch-failed 保留失败原因', () => {
+  const context = makeScheduler({
+    state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
+    marker: { status: 'launched' },
+  })
+  context.scheduler.init()
+  context.record.marker = { status: 'launch-failed', error: 'WMI 拒绝创建进程' }
+  context.timers.advance(500)
+
+  assert.equal(context.scheduler.lastRestart.status, 'launch-failed')
+  assert.equal(context.scheduler.lastRestart.error, 'WMI 拒绝创建进程')
+  assert.equal(context.timers.pendingCount(), 0)
+})
+
+test('初始化：stop 会取消标记轮询，之后不再改状态', () => {
+  const context = makeScheduler({
+    state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
+    marker: { status: 'launched' },
+  })
+  context.scheduler.init()
+  assert.equal(context.timers.pendingCount(), 1)
+
+  context.scheduler.stop()
+  assert.equal(context.timers.pendingCount(), 0)
+
+  context.record.marker = { status: 'restarted', ready: true }
+  context.timers.advance(600)
+  assert.equal(context.scheduler.lastRestart.status, 'firing')
 })
 
 test('初始化：标记 stop-failed 时记为停不掉旧实例', () => {

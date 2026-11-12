@@ -18,7 +18,7 @@ import {
 import { routePrefix, defaultDelaySeconds, dialogMinRemainingSeconds } from '../lib/constants.js'
 import { readJson } from '../lib/fsutil.js'
 import { createPluginSnapshot } from '../lib/plugin-state.js'
-import { makeFakeSpawn } from './helpers.js'
+import { makeFakeSpawn, makeClock, makeTimers } from './helpers.js'
 import { Readable } from 'node:stream'
 
 function tempDir(t) {
@@ -638,6 +638,55 @@ test('装配：上次重启已完成的记录会触发开机汇报', async (t) =
   assert.match(ctx.injectLog[0].message.content[0].text, /DSH 已重启完成/)
   const diskState = readJson(path.join(dir, 'restart-scheduler.json'))
   assert.equal(diskState.lastRestart.reported, true)
+})
+
+test('装配：开机标记稍后才确认时补排开机汇报', async (t) => {
+  const dir = tempDir(t)
+  const ctx = makeFakeCtx({ sessionStates: [['session-a', 'idle']] })
+  const clock = makeClock(0)
+  const timers = makeTimers(clock)
+  fs.writeFileSync(
+    path.join(dir, 'restart-scheduler.json'),
+    JSON.stringify({
+      version: 1,
+      tasks: [],
+      phase: 'idle',
+      paused: null,
+      lastTickAt: null,
+      lastRestart: {
+        id: 'restart-run-race',
+        status: 'firing',
+        firedAt: new Date(0).toISOString(),
+        sessionIds: ['session-a'],
+        tasks: [{ id: 'restart-old', sessionId: 'session-a' }],
+        fired: true,
+      },
+    }),
+    'utf8',
+  )
+  fs.writeFileSync(path.join(dir, 'restart-scheduler-marker.json'), JSON.stringify({ status: 'launched' }), 'utf8')
+
+  makePlugin(t, {
+    ctx,
+    dir,
+    options: { now: clock.now, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout },
+  })
+
+  // 启动时标记还没到终态：先保持 firing，不汇报。
+  assert.equal(ctx.injectLog.length, 0)
+
+  fs.writeFileSync(
+    path.join(dir, 'restart-scheduler-marker.json'),
+    JSON.stringify({ status: 'restarted', ready: true, pid: 32816, ports: [2829] }),
+    'utf8',
+  )
+  timers.advance(600)
+
+  // 汇报本身走真实定时器（reportRetryMs=10），等它送出。
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 60))
+  assert.equal(ctx.injectLog.length, 1)
+  assert.match(ctx.injectLog[0].message.content[0].text, /DSH 已重启完成/)
+  assert.equal(readJson(path.join(dir, 'restart-scheduler.json')).lastRestart.reported, true)
 })
 
 // ———————————————————————— 插件启用设置保护 ————————————————————————
