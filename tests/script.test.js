@@ -143,15 +143,37 @@ test('脚本文本：唤醒事件不由脚本做 JSON 往返覆盖', () => {
   assert.match(text, /Move-Item -Force -LiteralPath \$pendingFile/)
 })
 
-test('脚本文本：先记录旧 PID，旧实例全死且只探新 PID 端口才算就绪', () => {
+test('脚本文本：先记录旧 PID，旧实例全死后沿新进程树探端口才算就绪', () => {
   const text = buildRestartScript({ homeDir: 'C:\\h' })
   assert.match(text, /oldPids/)
   assert.match(text, /stop-failed/)
   assert.match(text, /\$result\.ProcessId/)
   assert.match(text, /Get-Process -Id \$dshPid/)
-  assert.match(text, /-OwningProcess \$dshPid/)
+  // 真正监听端口的是入口 PID 的子进程，必须靠 ParentProcessId 收集整棵树。
+  assert.match(text, /function Get-ProcessTreeIds/)
+  assert.match(text, /ParentProcessId/)
+  assert.match(text, /\$treeIds/)
+  assert.match(text, /\$treeIds -contains \[int\]\$_\.OwningProcess/)
+  assert.match(text, /Write-Marker 'restarted' \$ready \$dshPid @\(\$ports\) \$readyAt/)
+  // 旧实例必须先全部消失，才允许收集新进程树，避免把旧端口算成新实例的。
+  const oldAliveAt = text.indexOf('$oldAlive')
+  const treeAt = text.indexOf('$treeIds = @(Get-ProcessTreeIds $dshPid)')
+  assert.ok(oldAliveAt >= 0 && treeAt > oldAliveAt, '旧 PID 判定必须早于进程树枚举')
+  // 不能再只查入口 PID 自己的监听端口。
+  assert.doesNotMatch(text, /-OwningProcess \$dshPid/)
   // 成功判定不能再按进程名取第一个。
   assert.doesNotMatch(text, /Get-Process -Name 'DeepSeek Harness'[^\n]*-First 1/)
+})
+
+test('脚本文本：进程树探测有深度/节点/时间上限，超时不伪造就绪时间', () => {
+  const text = buildRestartScript({ homeDir: 'C:\\h' })
+  assert.match(text, /\$processTreeMaxDepth = 6/)
+  assert.match(text, /\$processTreeMaxNodes = 128/)
+  assert.match(text, /\$processTreeScanBudgetMs = 5000/)
+  // 只有 TCP connect 成功才写 readyAt；超时分支保持 ready=false。
+  assert.match(text, /if \(\$ready\) \{\r?\n\s*\$readyAt = \(Get-Date\)/)
+  assert.match(text, /if \(\$dshPid -le 0\) \{ \$ready = \$false; \$readyAt = '' \}/)
+  assert.match(text, /dsh not ready after probe timeout/)
 })
 
 test('脚本文本：路径里的单引号被安全转义', () => {

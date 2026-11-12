@@ -45,6 +45,23 @@ DSH 命令行 `dsh plugin` 对齐依赖时，会把已安装的 bundle 重新加
 
 旧进程退出到新进程启动之间是配置唯一的「空窗期」，写回放在这里，新进程读到的就是重启前的设置。快照或恢复失败只记日志，不影响重启本身；找不到 profile 或文件时安全跳过，不改动 `cordis.patch.yml` 的内容。
 
+## 重启成功如何判定
+
+脚本从 WMI `Win32_Process.Create` 拿到的是 Electron 入口进程，真正监听 Web GUI 端口的是它派生出来的子进程。因此就绪判定不能只看入口 PID 自己的端口，也不能按进程名扫：同名进程里既有渲染进程，也可能有还没退干净的旧实例。判定顺序是：
+
+1. 先确认重启前记下的旧 PID 全部消失，否则这一轮继续等——旧实例还在时，它的端口可能被误当成新实例的。
+2. 从入口 PID 出发，按 `Win32_Process` 的 `ParentProcessId` 收集整棵进程树（含入口自身）；深度上限 6、节点上限 128、单次扫描 5 秒，避免异常父子环或进程爆炸把探测拖死。
+3. 汇总树内所有进程的 Listen 端口，逐个 TCP connect `127.0.0.1`；任意一个连上就写 `status=restarted`、`ready=true`、`pid`、`ports`、`readyAt`。
+4. 外层共 45 次 × 2 秒。超时仍写 `status=restarted`，但 `ready=false`、不写 `readyAt`，插件状态记为 `restarted-unconfirmed`，不会伪造成成功。
+
+入口进程活着只说明「已拉起」，端口可连才说明「已就绪」；状态文件把这两种情况分开记录。
+
+## 唤醒事件与 schedule.json
+
+宿主触发重启时，先把唤醒事件合并进 `storages/schedule.json`，同时留下 `.base`（合并前原文件的字节）和 `.pending`（合并结果）。脚本只做一件事：旧实例全退后，如果当前 `schedule.json` 仍与 `.base` 一致，就用 `.pending` 原子替换；不一致就记 `schedule.json changed after host merge, skip wake apply` 并跳过。
+
+有唤醒事件时，合并结果本身就是宿主写进 `schedule.json` 的，当前文件必然不等于 `.base`，所以正常重启也会出现这行日志。它是有意保护：宿主可能在关停窗口里又写入新状态，脚本不能用旧快照覆盖；唤醒事件在合并阶段已经就位，跳过替换不会丢唤醒。
+
 ## 系统提示
 
 插件加载时往系统提示里注册一段静态文本（段名 `dsh-restart-guidance`）：要重启 DSH 时用 `dsh_restart` 排期，不要自己杀进程或拼 `schtasks`——手动重启会让会话失联。

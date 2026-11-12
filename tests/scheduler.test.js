@@ -441,12 +441,24 @@ test('初始化：旧版中文键状态文件仍能恢复任务', () => {
 test('初始化：有 restarted 标记时把上次重启记为已重启', () => {
   const context = makeScheduler({
     state: { tasks: [], lastRestart: { id: 'r1', status: 'firing', sessionIds: ['s1'] } },
-    marker: { status: 'restarted', ready: true, ports: [6067] },
+    marker: {
+      status: 'restarted',
+      ready: true,
+      pid: 35412,
+      ports: [10869],
+      at: '2026-11-12T14:39:46.291Z',
+      readyAt: '2026-11-12T14:39:47.500Z',
+    },
   })
   context.scheduler.init()
   assert.equal(context.scheduler.lastRestart.status, 'restarted')
   assert.equal(context.scheduler.lastRestart.ready, true)
+  assert.equal(context.scheduler.lastRestart.pid, 35412)
+  assert.deepEqual(context.scheduler.lastRestart.ports, [10869])
+  // restartedAt 优先取真实可连时间，而不是脚本拉起时间。
+  assert.equal(context.scheduler.lastRestart.restartedAt, '2026-11-12T14:39:47.500Z')
   assert.equal(context.scheduler.bootRecord.confirmed, true)
+  assert.equal(context.scheduler.bootRecord.marker, 'restarted')
 })
 
 test('初始化：标记是 started 时记为未确认', () => {
@@ -479,11 +491,13 @@ test('初始化：标记 launch-failed 时保留失败原因', () => {
 test('初始化：标记 restarted 但未就绪不算重启成功', () => {
   const context = makeScheduler({
     state: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
-    marker: { status: 'restarted', ready: false, ports: [] },
+    marker: { status: 'restarted', ready: false, pid: 35412, ports: [], at: '2026-11-12T14:39:46.291Z' },
   })
   context.scheduler.init()
   assert.equal(context.scheduler.lastRestart.status, 'restarted-unconfirmed')
+  assert.notEqual(context.scheduler.lastRestart.ready, true)
   assert.equal(context.scheduler.bootRecord.confirmed, false)
+  assert.equal(context.scheduler.bootRecord.marker, 'restarted')
 })
 
 test('初始化：标记 stop-failed 时记为停不掉旧实例', () => {
