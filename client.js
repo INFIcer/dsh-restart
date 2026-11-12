@@ -1,6 +1,6 @@
 // 客户端界面：纯 DOM（不注册任何官方槽位，不 require react）。
 //
-// 为什么要纯 DOM：主人讨厌抢占官方槽位，纯 DOM 挂一个 fixed 遮罩是改动最小、
+// 为什么要纯 DOM：用户讨厌抢占官方槽位，纯 DOM 挂一个 fixed 遮罩是改动最小、
 // 最不影响别的插件的方式（dsh-notify-me 已经证明这样能跑）。
 //
 // 职责：
@@ -17,6 +17,9 @@ const mouseResumeMs = 1000
 const overlayId = 'dsr-overlay'
 const hintId = 'dsr-hint'
 const styleId = 'dsr-style'
+
+// 任务还没开始倒计时（宿主在等所有会话空闲）时，剩余时间那一列显示的文字。
+const waitingText = '等待中'
 
 // 悬浮条钉在左侧栏底部、用户头像行上方的那块空白里：左侧栏约 257px 宽、底部头像行约 44px 高，
 // left 16px + bottom 60px 正好落在两者之间；侧栏变窄时靠 max-width 加省略号兜底。
@@ -87,6 +90,10 @@ function getOverlay() {
   overlay.hidden = true
   overlay.setAttribute('role', 'dialog')
   overlay.setAttribute('aria-label', 'DSH 重启倒计时')
+  // 点卡片外的空白处兜底收起：卡片内部的点击冒泡上来时 target 不是 overlay，不会误触发。
+  overlay.addEventListener('click', (event) => {
+    if (event?.target === overlay) collapse()
+  })
   ;(document.body || document.documentElement).appendChild(overlay)
   return overlay
 }
@@ -178,43 +185,9 @@ function collapse() {
   renderHint(ui.lastSnapshot, false)
 }
 
-function expand(state) {
-  const overlay = getOverlay()
-  ui.open = true
-  overlay.hidden = false
-  // 弹窗顶替悬浮条：同一时刻只留一个提示。
-  renderHint(null, true)
-  // 打开瞬间请宿主把不足 5 秒的任务抬回 5 秒（每次都请求，宿主自己幂等）。
-  void request('/dialog-open', { method: 'POST' }).then((result) => {
-    if (result?.snapshot) render(result.snapshot)
-  })
-  if (state) render(state)
-}
-
-function render(state) {
-  const overlay = getOverlay()
+/** 把整张卡片画进一个还没挂载的容器里；中途抛错只会抛给调用方，遮罩此时还没亮。 */
+function buildCard(state) {
   const tasks = Array.isArray(state?.tasks) ? state.tasks : []
-  const hasTasks = tasks.length > 0
-
-  if (!hasTasks) {
-    overlay.hidden = true
-    ui.open = false
-    ui.lastTaskCount = 0
-    ui.raisedRequested = false
-    renderHint(state, false)
-    return
-  }
-
-  if (ui.lastTaskCount === 0 && !ui.open) {
-    // 任务从无到有：自动展开（展开里会 POST dialog-open），悬浮条随之隐藏。
-    expand(state)
-    return
-  }
-  ui.lastTaskCount = tasks.length
-  // 弹窗收起时用左下悬浮条显示最短的剩余倒计时；展开时让位给弹窗。
-  renderHint(state, ui.open)
-
-  // —— 重画卡片 ——
   const card = makeEl('div', 'dsr-card')
   const head = makeEl('div', 'dsr-head')
   head.appendChild(makeEl('div', 'dsr-title', 'DSH 重启倒计时'))
@@ -223,14 +196,14 @@ function render(state) {
   head.appendChild(phase)
   card.appendChild(head)
 
-  const hint = makeEl(
+  const tip = makeEl(
     'div',
     'dsr-tip',
     isPaused(state)
       ? '已暂停：鼠标在动时倒计时不走，停下 1 秒后自动继续。'
       : '鼠标一移动，所有倒计时都会暂停；停 1 秒后自动恢复。',
   )
-  card.appendChild(hint)
+  card.appendChild(tip)
 
   const list = makeEl('ul', 'dsr-list')
   for (const task of tasks) {
@@ -324,8 +297,110 @@ function render(state) {
   foot.appendChild(collapseButton)
   card.appendChild(foot)
 
-  overlay.textContent = ''
-  overlay.appendChild(card)
+  return card
+}
+
+/**
+ * 原子地显示弹窗：先在 detached 容器里把卡片完整画完，成功后才清空并挂进遮罩、
+ * 最后才取消 hidden。绘制抛错就保持收起，把可读错误交给悬浮条。
+ */
+function showOverlay(state) {
+  const tasks = Array.isArray(state?.tasks) ? state.tasks : []
+  try {
+    const card = buildCard(state)
+    const overlay = getOverlay()
+    overlay.textContent = ''
+    overlay.appendChild(card)
+    overlay.hidden = false
+    ui.open = true
+    ui.lastTaskCount = tasks.length
+    lastPaintError = ''
+    // 弹窗顶替悬浮条：同一时刻只留一个提示。
+    renderHint(null, true)
+    return true
+  } catch (error) {
+    try {
+      const overlay = getOverlay()
+      overlay.hidden = true
+      overlay.textContent = ''
+    } catch {
+      /* 忽略 */
+    }
+    ui.open = false
+    // 归零后下一拍轮询会再试一次；失败期间悬浮条始终是重试入口。
+    ui.lastTaskCount = 0
+    ui.error = '重启面板绘制失败'
+    const message = String(error?.message || error)
+    if (lastPaintError !== message) {
+      lastPaintError = message
+      try {
+        console.warn('[dsh-restart-plugin] 重启面板绘制失败（已收起，等待重试）:', error)
+      } catch {
+        /* 忽略 */
+      }
+    }
+    renderHintError('面板绘制失败，点击重试')
+    return false
+  }
+}
+
+/** 拿到快照后真正打开弹窗；没有任务就保持收起。 */
+function openFromSnapshot(snapshot) {
+  const tasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : []
+  if (tasks.length === 0) {
+    render(snapshot)
+    return
+  }
+  if (!showOverlay(snapshot)) return
+  // 打开瞬间请宿主把不足 5 秒的任务抬回 5 秒（每次都请求，宿主自己幂等）。
+  void request('/dialog-open', { method: 'POST' }).then((result) => {
+    if (result?.snapshot) render(result.snapshot)
+  })
+}
+
+function expand(state) {
+  if (state) {
+    openFromSnapshot(state)
+    return
+  }
+  // 宿主快照还没回来 / 丢了：先把快照拿回来再画，绝不让遮罩抢先出现。
+  void request('/state').then((snapshot) => {
+    if (!snapshot || snapshot.ok !== true) {
+      ui.error = `拿不到宿主状态（${String(snapshot?.error || '未知错误')}）`
+      renderHintError('连不上宿主，点击重试')
+      return
+    }
+    consecutiveFailures = 0
+    ui.lastSnapshot = snapshot
+    openFromSnapshot(snapshot)
+  })
+}
+
+function render(state) {
+  const tasks = Array.isArray(state?.tasks) ? state.tasks : []
+
+  if (tasks.length === 0) {
+    const overlay = document.getElementById(overlayId)
+    if (overlay) {
+      overlay.hidden = true
+      overlay.textContent = ''
+    }
+    ui.open = false
+    ui.lastTaskCount = 0
+    ui.raisedRequested = false
+    renderHint(state, false)
+    return
+  }
+
+  if (ui.lastTaskCount === 0 && !ui.open) {
+    // 任务从无到有：自动展开；展开失败会保持收起，由悬浮条给出错误与重试入口。
+    expand(state)
+    return
+  }
+  ui.lastTaskCount = tasks.length
+  // 弹窗收起时用左下悬浮条显示最短的剩余倒计时；展开时让位给弹窗。
+  renderHint(state, ui.open)
+  if (ui.open) showOverlay(state)
 }
 
 // ———————————————————————— 悬浮条 ————————————————————————
@@ -427,17 +502,43 @@ function renderHint(state, open) {
   hint.title = hintTitle(tasks.length)
 }
 
+/** 悬浮条上的错误态：收起弹窗后仍然可点，点了就会重新取快照并再画一次。 */
+function renderHintError(message) {
+  const hint = getHint()
+  const text = `DSH 重启 · ${message}`
+  // 错误态每 400ms 会被重试路径再画一次：内容没变就别重建节点（aria-live 会重复播报）。
+  if (ui.hintText === text && hint.hidden === false) {
+    hint.title = '点击重试'
+    return
+  }
+  ui.hintText = text
+  ui.hintPaused = null
+  hint.hidden = false
+  hint.classList.remove('dsr-paused')
+  hint.textContent = ''
+  hint.appendChild(makeEl('span', 'dsr-dot'))
+  hint.appendChild(makeEl('span', 'dsr-hint-text', text))
+  hint.title = '点击重试'
+}
+
 // ———————————————————————— 轮询 ————————————————————————
 
 let pollTimer = null
 let consecutiveFailures = 0
+/** 上一次绘制失败的错误文本，用来避免每 400ms 重复刷同一条 warn。 */
+let lastPaintError = ''
 
 async function pollOnce() {
   const state = await request('/state')
   if (!state || state.ok !== true) {
     consecutiveFailures += 1
-    if (consecutiveFailures === 3) {
+    if (consecutiveFailures >= 3) {
       ui.error = `连不上宿主（${String(state?.error || '未知错误')}）`
+      // 连续失败时别把用户锁在虚化遮罩里：收起弹窗，悬浮条继续当重试入口。
+      if (ui.open) {
+        collapse()
+        renderHintError('连不上宿主，点击重试')
+      }
     }
     return
   }
@@ -492,12 +593,21 @@ function onBlur() {
   void request('/resume', { method: 'POST' })
 }
 
+/** Esc 兜底：弹窗开着时按 Esc 就收起，焦点在页面任何位置都生效。 */
+function onKeyDown(event) {
+  if (!ui.open) return
+  if (event?.key !== 'Escape' && event?.key !== 'Esc') return
+  collapse()
+}
+
 /** 返回卸载函数：dispose 时必须摘掉挂在 document/window 上的监听，否则重装会叠加多份。 */
 function mountMouseListeners() {
   document.addEventListener('mousemove', onMouseMove, { passive: true })
+  document.addEventListener('keydown', onKeyDown)
   window.addEventListener('blur', onBlur)
   return function unmountMouseListeners() {
     document.removeEventListener('mousemove', onMouseMove, { passive: true })
+    document.removeEventListener('keydown', onKeyDown)
     window.removeEventListener('blur', onBlur)
   }
 }
@@ -540,6 +650,7 @@ function apply(ctx) {
                 const node = document.getElementById(id)
                 if (node && node.parentNode) node.parentNode.removeChild(node)
               }
+              ui.open = false
               ui.lastSnapshot = null
               ui.lastTaskCount = 0
               ui.raisedRequested = false

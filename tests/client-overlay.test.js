@@ -1,0 +1,224 @@
+// 重启面板的遮罩显示与兜底交互：用 vm + 假 DOM 跑真实的 client.js。
+// 覆盖三件事：快照没回来时不亮遮罩、绘制抛错时必须收起、遮罩的鼠标/键盘兜底收起。
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { makePage, startClient, findNode, sleep } from './fake-dom.js'
+
+function responseFor(body) {
+  return { status: 200, text: async () => JSON.stringify(body) }
+}
+
+function makeTask(overrides) {
+  return { id: 'task-1', sessionId: 'session-abc123', sessionLabel: '会话 A', remainingMs: 9000, reason: '改完了', ...overrides }
+}
+
+function makeState(tasks) {
+  return { ok: true, phase: 'countdown', paused: false, busyCount: 0, tasks }
+}
+
+/** 装配并等待第一拍轮询完成；返回清理函数。 */
+async function mount(page, fetchImpl, waitMs = 50) {
+  const mod = startClient(page, fetchImpl)
+  const cleanup = []
+  mod.apply({ effect: (factory) => { cleanup.push(factory()) } })
+  await sleep(waitMs)
+  return () => {
+    for (const disposeFn of cleanup) disposeFn()
+  }
+}
+
+function overlayOf(page) {
+  return page.document.getElementById('dsr-overlay')
+}
+
+function hintOf(page) {
+  return page.document.getElementById('dsr-hint')
+}
+
+test('等待中的任务（remainingMs 为 null）也能画出卡片，不抛 waitingText 未定义', async () => {
+  const page = makePage()
+  const state = { ok: true, phase: 'waiting', paused: false, busyCount: 2, tasks: [makeTask({ remainingMs: null })] }
+  const unmount = await mount(page, async (url) => responseFor(String(url).endsWith('/state') ? state : { ok: true }))
+
+  const overlay = overlayOf(page)
+  assert.equal(overlay.hidden, false)
+  const card = findNode(overlay, (node) => node.className === 'dsr-card')
+  assert.ok(card)
+  const waitingCell = findNode(card, (node) => String(node.className).includes('dsr-waiting'))
+  assert.ok(waitingCell)
+  assert.equal(waitingCell.textContent, '等待中')
+
+  unmount()
+})
+
+test('没有快照时点悬浮条：先取快照，拿到之前不显示遮罩', async () => {
+  const page = makePage()
+  const pending = []
+  const unmount = await mount(
+    page,
+    async (url) => {
+      if (!String(url).endsWith('/state')) return responseFor({ ok: true })
+      return new Promise((fulfil) => { pending.push(() => fulfil(responseFor(makeState([makeTask()])))) })
+    },
+    0,
+  )
+  const overlay = overlayOf(page)
+  const hint = hintOf(page)
+  assert.equal(overlay.hidden, true)
+
+  hint.listeners.click[0]()
+  await sleep(30)
+  // 快照请求还挂在半路：遮罩必须保持收起。
+  assert.equal(overlay.hidden, true)
+
+  for (const resolveRequest of pending) resolveRequest()
+  await sleep(50)
+  // 拿到快照后才画卡片；同时说明最开始的轮询也拿到了同一份快照。
+  assert.equal(overlay.hidden, false)
+  assert.ok(findNode(overlay, (node) => node.className === 'dsr-card'))
+
+  unmount()
+})
+
+test('拿不到快照时点悬浮条：保持收起，悬浮条显示可读错误且仍可点', async () => {
+  const page = makePage()
+  let stateRequests = 0
+  const unmount = await mount(page, async (url) => {
+    if (!String(url).endsWith('/state')) return responseFor({ ok: true })
+    stateRequests += 1
+    return responseFor({ ok: false, error: '宿主没起来' })
+  })
+
+  const overlay = overlayOf(page)
+  const hint = hintOf(page)
+  assert.equal(overlay.hidden, true)
+
+  hint.listeners.click[0]()
+  await sleep(30)
+  assert.equal(overlay.hidden, true)
+  assert.equal(hint.hidden, false)
+  assert.match(hint.textContent, /连不上宿主/)
+
+  const before = stateRequests
+  hint.listeners.click[0]()
+  await sleep(30)
+  assert.ok(stateRequests > before, '错误态下悬浮条仍应可点，点了会重新取快照')
+  assert.equal(overlay.hidden, true)
+
+  unmount()
+})
+
+test('渲染抛错时遮罩必须保持隐藏，悬浮条给出可读错误', async () => {
+  const page = makePage()
+  const state = makeState([makeTask()])
+  const warnings = []
+  const originalWarn = console.warn
+  console.warn = (...args) => { warnings.push(args) }
+
+  const mod = startClient(page, async (url) => responseFor(String(url).endsWith('/state') ? state : { ok: true }))
+  const cleanup = []
+  mod.apply({ effect: (factory) => { cleanup.push(factory()) } })
+
+  // 装配完成后让卡片构建必失败（div 建不出来），模拟真实环境里 render 半路抛错。
+  const originalCreateElement = page.document.createElement
+  page.document.createElement = (label) => {
+    if (label === 'div') throw new Error('createElement 坏了')
+    return originalCreateElement(label)
+  }
+
+  try {
+    // 多等几拍：绘制失败后每一拍都会重试，但遮罩绝不能被点亮。
+    await sleep(500)
+
+    const overlay = overlayOf(page)
+    const hint = hintOf(page)
+    assert.equal(overlay.hidden, true)
+    assert.equal(overlay.children.length, 0)
+    assert.equal(hint.hidden, false)
+    assert.match(hint.textContent, /面板绘制失败/)
+    assert.ok(warnings.some((args) => String(args[0]).includes('重启面板绘制失败')))
+  } finally {
+    page.document.createElement = originalCreateElement
+    for (const disposeFn of cleanup) disposeFn()
+    console.warn = originalWarn
+  }
+})
+
+test('点遮罩空白处或按 Esc 收起；点卡片内部不收起', async () => {
+  const page = makePage()
+  const state = makeState([makeTask()])
+  const unmount = await mount(page, async (url) => responseFor(String(url).endsWith('/state') ? state : { ok: true }))
+
+  const overlay = overlayOf(page)
+  const hint = hintOf(page)
+  assert.equal(overlay.hidden, false)
+
+  // 点卡片内部不应收起
+  const card = findNode(overlay, (node) => node.className === 'dsr-card')
+  overlay.listeners.click[0]({ target: card })
+  assert.equal(overlay.hidden, false)
+
+  // 点遮罩空白处收起，悬浮条接管
+  overlay.listeners.click[0]({ target: overlay })
+  assert.equal(overlay.hidden, true)
+  assert.equal(hint.hidden, false)
+
+  // 悬浮条重新打开后用 Esc 收起
+  hint.listeners.click[0]()
+  await sleep(20)
+  assert.equal(overlay.hidden, false)
+  page.docListeners.keydown[0]({ key: 'Escape' })
+  assert.equal(overlay.hidden, true)
+  assert.equal(hint.hidden, false)
+
+  unmount()
+})
+
+test('连续三次请求失败时遮罩自动收起，悬浮条提示连不上宿主', async () => {
+  const page = makePage()
+  const state = makeState([makeTask()])
+  let failing = false
+  const unmount = await mount(page, async (url) => {
+    if (!String(url).endsWith('/state')) return responseFor({ ok: true })
+    return responseFor(failing ? { ok: false, error: '宿主没起来' } : state)
+  })
+
+  const overlay = overlayOf(page)
+  const hint = hintOf(page)
+  assert.equal(overlay.hidden, false)
+
+  failing = true
+  await sleep(1500)
+  assert.equal(overlay.hidden, true)
+  assert.equal(hint.hidden, false)
+  assert.match(hint.textContent, /连不上宿主/)
+
+  unmount()
+})
+
+test('页面切到后台不轮询，回到前台后继续按快照更新', async () => {
+  const page = makePage()
+  const state = makeState([makeTask()])
+  let requests = 0
+  const unmount = await mount(page, async (url) => {
+    if (!String(url).endsWith('/state')) return responseFor({ ok: true })
+    requests += 1
+    return responseFor(state)
+  })
+
+  const overlay = overlayOf(page)
+  assert.equal(overlay.hidden, false)
+
+  page.document.hidden = true
+  const backgroundRequests = requests
+  await sleep(900)
+  assert.equal(requests, backgroundRequests, '切到后台后不再轮询')
+
+  state.tasks = []
+  page.document.hidden = false
+  await sleep(600)
+  assert.equal(overlay.hidden, true)
+  assert.equal(hintOf(page).hidden, true)
+
+  unmount()
+})
