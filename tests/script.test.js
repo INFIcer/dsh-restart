@@ -103,6 +103,32 @@ test('脚本文本：包含杀进程、清 cookie、写唤醒事件、WMI 拉起
   assert.doesNotMatch(text, /^\s*Start-Process/mi)
 })
 
+test('脚本文本：旧进程全退后先写回插件设置，再 WMI 拉起', () => {
+  const text = buildRestartScript({
+    homeDir: 'C:\\Users\\x\\.dsh',
+    profileDir: 'C:\\Users\\x\\.dsh\\profiles\\desktop',
+    pluginSnapshotDir: 'C:\\Users\\x\\.dsh\\plugin-snapshots\\2026-11-12T22-21-00-123Z',
+    wakeEvents: [{ sessionId: 'session-a', wakeText: '好了', afterSeconds: 15 }],
+  })
+  assert.match(text, /Restore-PluginFile 'package\.json'/)
+  assert.match(text, /Restore-PluginFile 'cordis\.patch\.yml'/)
+  assert.match(text, /\.bak-restart-/)
+  assert.match(text, /C:\\Users\\x\\.dsh\\profiles\\desktop/)
+  assert.match(text, /plugin-snapshots/)
+  const stopped = text.indexOf('all dsh processes stopped')
+  const restore = text.indexOf('Restore-PluginFile')
+  const launch = text.indexOf('Invoke-CimMethod -ClassName Win32_Process')
+  assert.ok(stopped >= 0 && restore >= 0 && launch >= 0, '脚本应包含三段关键文本')
+  assert.ok(stopped < restore, '写回必须发生在旧进程全退之后')
+  assert.ok(restore < launch, '写回必须发生在拉起新实例之前')
+})
+
+test('脚本文本：没有快照时跳过写回，但不影响后续拉起', () => {
+  const text = buildRestartScript({ homeDir: 'C:\\h' })
+  assert.match(text, /no plugin snapshot for this restart, skip restore/)
+  assert.ok(text.indexOf('Restore-PluginFile') < text.indexOf('Invoke-CimMethod -ClassName Win32_Process'))
+})
+
 test('脚本文本：唤醒事件不由脚本做 JSON 往返覆盖', () => {
   const text = buildRestartScript({
     homeDir: 'C:\\h',

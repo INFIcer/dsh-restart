@@ -163,6 +163,29 @@ test('触发载荷带上任务与会话（去重）', async () => {
   assert.deepEqual(payload.sessionIds.sort(), ['s1', 's2'])
 })
 
+test('触发重启：把插件设置快照信息带进 lastRestart 与落盘状态', async () => {
+  const snapshot = {
+    ok: true,
+    dir: 'C:\\fake\\plugin-snapshots\\2026-11-12T22-21-00-123Z',
+    profileDir: 'C:\\fake\\profiles\\desktop',
+    files: ['package.json', 'cordis.patch.yml'],
+  }
+  const context = makeScheduler({ onFire: async () => ({ ok: true, scriptPath: 'C:\\fake\\restart.ps1', launcher: 'schtasks', wakeCount: 0, pluginStateSnapshot: snapshot }) })
+  scheduleTask(context.scheduler, { delaySeconds: 10 })
+  await context.scheduler.fire(0)
+  assert.deepEqual(context.scheduler.lastRestart.pluginStateSnapshot, snapshot)
+  assert.deepEqual(context.getDiskState().lastRestart.pluginStateSnapshot, snapshot)
+})
+
+test('触发重启：快照失败时也把失败信息记下来，不丢字段', async () => {
+  const snapshot = { ok: false, dir: '', profileDir: 'C:\\fake\\profiles\\desktop', files: [], code: 'bad_json' }
+  const context = makeScheduler({ onFire: async () => ({ ok: true, scriptPath: 'C:\\fake\\restart.ps1', launcher: 'schtasks', wakeCount: 0, pluginStateSnapshot: snapshot }) })
+  scheduleTask(context.scheduler, { delaySeconds: 10 })
+  await context.scheduler.fire(0)
+  assert.equal(context.scheduler.lastRestart.pluginStateSnapshot.ok, false)
+  assert.equal(context.scheduler.lastRestart.pluginStateSnapshot.code, 'bad_json')
+})
+
 test('多任务各自倒计时，最短的先到点并一起触发', async () => {
   const context = makeScheduler()
   scheduleTask(context.scheduler, { sessionId: 's1', delaySeconds: 10 })

@@ -17,6 +17,8 @@ import {
 } from '../lib/host.js'
 import { routePrefix, defaultDelaySeconds, dialogMinRemainingSeconds } from '../lib/constants.js'
 import { readJson } from '../lib/fsutil.js'
+import { createPluginSnapshot } from '../lib/plugin-state.js'
+import { makeFakeSpawn } from './helpers.js'
 import { Readable } from 'node:stream'
 
 function tempDir(t) {
@@ -161,6 +163,12 @@ function makePlugin(t, override = {}) {
     markerFile: path.join(dir, 'restart-scheduler-marker.json'),
     heartbeatMs: 600000,
     reportRetryMs: 10,
+    // 插件启用设置一律指到临时目录，且清空 env，避免碰真实 profile 或真实 DSH_PROFILE_DIR。
+    pluginState: {
+      profileDir: path.join(dir, 'profile-settings'),
+      snapshotsRoot: path.join(dir, 'plugin-snapshots'),
+      env: {},
+    },
     onFire: async (payload) => {
       fire.push(payload)
       return { ok: true, scriptPath: options.scriptFile, launcher: 'schtasks', wakeCount: (payload?.sessionIds || []).length }
@@ -630,6 +638,248 @@ test('装配：上次重启已完成的记录会触发开机汇报', async (t) =
   assert.match(ctx.injectLog[0].message.content[0].text, /DSH 已重启完成/)
   const diskState = readJson(path.join(dir, 'restart-scheduler.json'))
   assert.equal(diskState.lastRestart.reported, true)
+})
+
+// ———————————————————————— 插件启用设置保护 ————————————————————————
+
+/** 造一份 profile 与其重启前快照，返回原始字节。 */
+function makeProfileFixture(t) {
+  const dir = tempDir(t)
+  const profileDir = path.join(dir, 'profile-settings')
+  fs.mkdirSync(profileDir, { recursive: true })
+  const manifest = `${JSON.stringify({ dsh: { profile: { bundles: ['alpha', 'beta'] } } }, null, 2)}\n`
+  const patch = '- id: alpha\n  disabled: true\n'
+  fs.writeFileSync(path.join(profileDir, 'package.json'), manifest, 'utf8')
+  fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'), patch, 'utf8')
+  const snapshot = createPluginSnapshot({
+    profileDir,
+    snapshotsRoot: path.join(dir, 'plugin-snapshots'),
+    now: Date.now(),
+  })
+  assert.equal(snapshot.ok, true)
+  return { dir, profileDir, manifest, patch, snapshot }
+}
+
+/** 写一份「上次重启已完成」的状态文件，让开机校验有据可依。 */
+function seedRestartedState(dir, lastRestart) {
+  fs.writeFileSync(
+    path.join(dir, 'restart-scheduler.json'),
+    JSON.stringify({ version: 1, tasks: [], phase: 'idle', paused: null, lastTickAt: null, lastRestart }),
+    'utf8',
+  )
+}
+
+/** 收集日志，断言某些 warn/info 确实出现过。 */
+function makeRecordingLog() {
+  const entries = []
+  return {
+    entries,
+    log: {
+      info: (...params) => entries.push(['info', params.join(' ')]),
+      warn: (...params) => entries.push(['warn', params.join(' ')]),
+      error: (...params) => entries.push(['error', params.join(' ')]),
+    },
+  }
+}
+
+test('开机校验：插件设置被启动过程改写时按快照写回并记 warn', (t) => {
+  const fixture = makeProfileFixture(t)
+  const { log, entries } = makeRecordingLog()
+  seedRestartedState(fixture.dir, {
+    id: 'restart-run-snapshot',
+    status: 'restarted',
+    firedAt: new Date().toISOString(),
+    tasks: [],
+    sessionIds: [],
+    reported: true,
+    pluginStateSnapshot: {
+      ok: true,
+      dir: fixture.snapshot.dir,
+      profileDir: fixture.profileDir,
+      files: fixture.snapshot.files,
+    },
+  })
+  // 模拟 dsh plugin 的对齐逻辑：bundles 里塞进 intruder，disabled 被翻转。
+  fs.writeFileSync(
+    path.join(fixture.profileDir, 'package.json'),
+    JSON.stringify({ dsh: { profile: { bundles: ['alpha', 'beta', 'intruder'] } } }),
+    'utf8',
+  )
+  fs.writeFileSync(path.join(fixture.profileDir, 'cordis.patch.yml'), '- id: alpha\n  disabled: false\n', 'utf8')
+
+  makePlugin(t, {
+    dir: fixture.dir,
+    options: {
+      log,
+      pluginState: {
+        profileDir: fixture.profileDir,
+        snapshotsRoot: path.join(fixture.dir, 'plugin-snapshots'),
+        env: {},
+      },
+    },
+  })
+
+  assert.equal(fs.readFileSync(path.join(fixture.profileDir, 'package.json'), 'utf8'), fixture.manifest)
+  assert.equal(fs.readFileSync(path.join(fixture.profileDir, 'cordis.patch.yml'), 'utf8'), fixture.patch)
+  const backup = fs.readdirSync(fixture.profileDir).filter((name) => name.includes('.bak-restart-'))
+  assert.equal(backup.length, 2)
+  const diskState = readJson(path.join(fixture.dir, 'restart-scheduler.json'))
+  assert.equal(diskState.lastRestart.pluginStateRestored, true)
+  assert.ok(entries.some(([level, message]) => level === 'warn' && /改写/.test(message)))
+  assert.ok(entries.some(([level, message]) => level === 'warn' && /intruder/.test(message)))
+})
+
+test('开机校验：与快照一致时记 info、不改文件也不留备份', (t) => {
+  const fixture = makeProfileFixture(t)
+  const { log, entries } = makeRecordingLog()
+  seedRestartedState(fixture.dir, {
+    id: 'restart-run-clean',
+    status: 'restarted',
+    firedAt: new Date().toISOString(),
+    tasks: [],
+    sessionIds: [],
+    reported: true,
+    pluginStateSnapshot: {
+      ok: true,
+      dir: fixture.snapshot.dir,
+      profileDir: fixture.profileDir,
+      files: fixture.snapshot.files,
+    },
+  })
+
+  makePlugin(t, {
+    dir: fixture.dir,
+    options: {
+      log,
+      pluginState: {
+        profileDir: fixture.profileDir,
+        snapshotsRoot: path.join(fixture.dir, 'plugin-snapshots'),
+        env: {},
+      },
+    },
+  })
+
+  assert.equal(fs.readFileSync(path.join(fixture.profileDir, 'package.json'), 'utf8'), fixture.manifest)
+  assert.equal(
+    fs.readdirSync(fixture.profileDir).filter((name) => name.includes('.bak-restart-')).length,
+    0,
+  )
+  const diskState = readJson(path.join(fixture.dir, 'restart-scheduler.json'))
+  assert.equal(diskState.lastRestart.pluginStateRestored, true)
+  assert.ok(entries.some(([level, message]) => level === 'info' && /一致/.test(message)))
+})
+
+test('开机校验：没有可用快照时记 warn、标记 false，且不动 profile', (t) => {
+  const fixture = makeProfileFixture(t)
+  const { log, entries } = makeRecordingLog()
+  seedRestartedState(fixture.dir, {
+    id: 'restart-run-missing',
+    status: 'restarted',
+    firedAt: new Date().toISOString(),
+    tasks: [],
+    sessionIds: [],
+    reported: true,
+    pluginStateSnapshot: {
+      ok: false,
+      dir: '',
+      profileDir: fixture.profileDir,
+      files: [],
+      code: 'missing_profile',
+      error: 'profile 目录不存在',
+    },
+  })
+  const changed = JSON.stringify({ dsh: { profile: { bundles: ['alpha', 'beta', 'intruder'] } } })
+  fs.writeFileSync(path.join(fixture.profileDir, 'package.json'), changed, 'utf8')
+
+  makePlugin(t, {
+    dir: fixture.dir,
+    options: {
+      log,
+      pluginState: {
+        profileDir: fixture.profileDir,
+        snapshotsRoot: path.join(fixture.dir, 'plugin-snapshots'),
+        env: {},
+      },
+    },
+  })
+
+  assert.equal(fs.readFileSync(path.join(fixture.profileDir, 'package.json'), 'utf8'), changed)
+  const diskState = readJson(path.join(fixture.dir, 'restart-scheduler.json'))
+  assert.equal(diskState.lastRestart.pluginStateRestored, false)
+  assert.ok(entries.some(([level, message]) => level === 'warn' && /校验失败/.test(message)))
+})
+
+test('开机校验：已校验过的记录不再重复写回', (t) => {
+  const fixture = makeProfileFixture(t)
+  seedRestartedState(fixture.dir, {
+    id: 'restart-run-done',
+    status: 'restarted',
+    firedAt: new Date().toISOString(),
+    tasks: [],
+    sessionIds: [],
+    reported: true,
+    pluginStateRestored: true,
+    pluginStateSnapshot: {
+      ok: true,
+      dir: fixture.snapshot.dir,
+      profileDir: fixture.profileDir,
+      files: fixture.snapshot.files,
+    },
+  })
+  const changed = JSON.stringify({ dsh: { profile: { bundles: ['alpha', 'beta', 'intruder'] } } })
+  fs.writeFileSync(path.join(fixture.profileDir, 'package.json'), changed, 'utf8')
+
+  makePlugin(t, {
+    dir: fixture.dir,
+    options: {
+      pluginState: {
+        profileDir: fixture.profileDir,
+        snapshotsRoot: path.join(fixture.dir, 'plugin-snapshots'),
+        env: {},
+      },
+    },
+  })
+
+  assert.equal(fs.readFileSync(path.join(fixture.profileDir, 'package.json'), 'utf8'), changed)
+  const diskState = readJson(path.join(fixture.dir, 'restart-scheduler.json'))
+  assert.equal(diskState.lastRestart.pluginStateRestored, true)
+})
+
+test('触发重启：强杀前先给插件设置拍快照并记进状态', async (t) => {
+  const fixture = makeProfileFixture(t)
+  const spawnImpl = makeFakeSpawn([{ code: 0 }, { code: 0 }])
+  const { plugin } = makePlugin(t, {
+    dir: fixture.dir,
+    options: {
+      onFire: null,
+      spawnImpl,
+      filePath: { homeDir: path.join(fixture.dir, 'home') },
+      scheduleFilePath: path.join(fixture.dir, 'home', 'storages', 'schedule.json'),
+      pluginState: {
+        profileDir: fixture.profileDir,
+        snapshotsRoot: path.join(fixture.dir, 'plugin-snapshots'),
+        env: {},
+      },
+    },
+  })
+  plugin.scheduler.scheduleTask({
+    sessionId: 'session-a',
+    sessionLabel: '会话 A',
+    delaySeconds: 10,
+    reason: '测试',
+  })
+  await plugin.scheduler.fire(Date.now())
+
+  const record = plugin.scheduler.lastRestart
+  assert.equal(record.pluginStateSnapshot.ok, true)
+  assert.ok(fs.existsSync(record.pluginStateSnapshot.dir))
+  assert.deepEqual(fs.readdirSync(record.pluginStateSnapshot.dir).sort(), [
+    'cordis.patch.yml',
+    'package.json',
+  ])
+  assert.equal(spawnImpl.calls.length, 2)
+  const diskState = readJson(path.join(fixture.dir, 'restart-scheduler.json'))
+  assert.equal(diskState.lastRestart.pluginStateSnapshot.ok, true)
 })
 
 // ———————————————————————— 辅助函数 ————————————————————————
