@@ -11,6 +11,7 @@ import {
   重启提示文本,
   解析调用会话,
   取忙碌会话,
+  createBusyReader,
   会话标签,
   apply,
 } from '../lib/host.js'
@@ -42,10 +43,11 @@ function 假响应() {
   return res
 }
 
-/** 假 req：方法 + 可选 JSON 体（体是 Readable，能被 读请求体 正常消费）。 */
-function 假请求(方法 = 'GET', 体 = null) {
+/** 假 req：方法 + 可选 JSON 体（体是 Readable，能被 读请求体 正常消费）+ 可选请求头。 */
+function 假请求(方法 = 'GET', 体 = null, 请求头 = null) {
   const 请求 = Readable.from([Buffer.from(体 == null ? '' : String(体))])
   请求.method = 方法
+  if (请求头) 请求.headers = 请求头
   return 请求
 }
 
@@ -429,6 +431,85 @@ test('路由 pause：GET 回 405', async (t) => {
 })
 
 // ———————————————————————— 路由：cancel ————————————————————————
+
+// ———————————————————————— 路由：同源校验 ————————————————————————
+
+test('路由 pause：伪造 Origin 被 403 拒绝且不改变状态', async (t) => {
+  const { ctx, 插件 } = 造插件(t)
+  await 取工具(ctx).execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
+  const res = await 调路由(ctx, '/pause', 假请求('POST', null, {
+    host: '127.0.0.1:13066',
+    origin: 'http://evil.example',
+    'sec-fetch-site': 'cross-site',
+  }))
+  assert.equal(res.statusCode, 403)
+  assert.equal(JSON.parse(res.体).code, 'forbidden_origin')
+  assert.equal(插件.调度器.paused, null)
+})
+
+test('路由 cancel：伪造 Origin 被 403 拒绝且任务不变', async (t) => {
+  const { ctx, 插件 } = 造插件(t)
+  const 排 = await 取工具(ctx).execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
+  const res = await 调路由(ctx, '/cancel', 假请求('POST', JSON.stringify({ taskId: 排.task.id }), {
+    host: '127.0.0.1:13066',
+    origin: 'http://evil.example',
+  }))
+  assert.equal(res.statusCode, 403)
+  assert.equal(插件.调度器.tasks.length, 1)
+})
+
+test('路由 pause：同源请求通过（端口不写死）', async (t) => {
+  const { ctx } = 造插件(t)
+  await 取工具(ctx).execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
+  const res = await 调路由(ctx, '/pause', 假请求('POST', null, {
+    host: '127.0.0.1:54321',
+    origin: 'http://127.0.0.1:54321',
+    'sec-fetch-site': 'same-origin',
+  }))
+  assert.equal(res.statusCode, 200)
+  assert.equal(JSON.parse(res.体).已暂停, true)
+})
+
+test('路由 pause：非浏览器调用（无来源头）放行', async (t) => {
+  const { ctx } = 造插件(t)
+  const res = await 调路由(ctx, '/pause', 假请求('POST', null, { host: '127.0.0.1:13066' }))
+  assert.equal(res.statusCode, 200)
+})
+
+test('路由 pause：Sec-Fetch-Site 是 same-origin 但 Origin 跨站也拒', async (t) => {
+  const { ctx } = 造插件(t)
+  const res = await 调路由(ctx, '/pause', 假请求('POST', null, {
+    host: '127.0.0.1:13066',
+    origin: 'http://127.0.0.1:13067',
+    'sec-fetch-site': 'same-origin',
+  }))
+  assert.equal(res.statusCode, 403)
+})
+
+// ———————————————————————— 忙碌读取器 ————————————————————————
+
+test('忙碌读取器：持续忙碌超过上限后按空闲处理且只告警一次', () => {
+  let 状态 = 'running'
+  const ctx = { get: (名) => (名 === 'agents' ? { list: () => [{ id: 'a1', session: { id: 's1' }, status: 状态 }] } : undefined) }
+  const 警告 = []
+  let 现在 = 0
+  const 读 = createBusyReader(ctx, { warn: (信息) => 警告.push(信息) }, { now: () => 现在, 超时毫秒: 1000 })
+  assert.equal(读().length, 1)
+  现在 = 999
+  assert.equal(读().length, 1)
+  现在 = 1000
+  assert.equal(读().length, 0)
+  现在 = 2000
+  assert.equal(读().length, 0)
+  assert.equal(警告.length, 1)
+  // 会话真的空闲后，计时清零。
+  状态 = 'idle'
+  现在 = 3000
+  assert.equal(读().length, 0)
+  状态 = 'running'
+  现在 = 3500
+  assert.equal(读().length, 1)
+})
 
 test('路由 cancel：缺 taskId 回 400', async (t) => {
   const { ctx } = 造插件(t)

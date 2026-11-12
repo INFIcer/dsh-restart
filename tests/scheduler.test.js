@@ -9,7 +9,13 @@ import {
   取消反馈文本,
   规范化任务列表,
 } from '../lib/scheduler.js'
-import { 默认延迟秒, 最小延迟秒, 最大延迟秒, 弹框最小剩余秒 } from '../lib/constants.js'
+import {
+  默认延迟秒,
+  最小延迟秒,
+  最大延迟秒,
+  弹框最小剩余秒,
+  restartConfirmTimeoutMs,
+} from '../lib/constants.js'
 import { 造调度器, 造时钟, 设忙碌, 排任务 } from './helpers.js'
 
 test('规范延迟秒：默认 60', () => {
@@ -425,6 +431,63 @@ test('初始化：标记 launch-failed 时保留失败原因', () => {
   })
   上下文.调度器.初始化()
   assert.equal(上下文.调度器.lastRestart.status, 'launch-failed')
+})
+
+test('初始化：标记 restarted 但未就绪不算重启成功', () => {
+  const 上下文 = 造调度器({
+    状态: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
+    标记: { status: 'restarted', ready: false, ports: [] },
+  })
+  上下文.调度器.初始化()
+  assert.equal(上下文.调度器.lastRestart.status, 'restarted-unconfirmed')
+  assert.equal(上下文.调度器.已启动记录.confirmed, false)
+})
+
+test('初始化：标记 stop-failed 时记为停不掉旧实例', () => {
+  const 上下文 = 造调度器({
+    状态: { tasks: [], lastRestart: { id: 'r1', status: 'firing' } },
+    标记: { status: 'stop-failed' },
+  })
+  上下文.调度器.初始化()
+  assert.equal(上下文.调度器.lastRestart.status, 'stop-failed')
+})
+
+test('初始化：状态文件版本不匹配时不恢复也不覆盖', () => {
+  const 状态 = { 版本: 0, tasks: [{ id: 'restart-a', sessionId: 's1', delaySeconds: 20 }] }
+  const 上下文 = 造调度器({ 状态 })
+  上下文.调度器.初始化()
+  assert.equal(上下文.调度器.stateIncompatible, true)
+  assert.equal(上下文.调度器.tasks.length, 0)
+  assert.equal(上下文.记录.落盘.length, 0)
+  assert.equal(上下文.取磁盘状态().版本, 0)
+  assert.equal(上下文.取磁盘状态().tasks.length, 1)
+})
+
+test('重启确认：超时后复位 firing 并通知排过任务的会话', async () => {
+  const 上下文 = 造调度器()
+  排任务(上下文.调度器)
+  await 上下文.调度器.触发(0)
+  assert.equal(上下文.调度器.firing, true)
+  assert.equal(上下文.调度器.lastRestart.firingStartedAt, 0)
+
+  上下文.时钟.走(restartConfirmTimeoutMs)
+  const 结果 = await 上下文.调度器.tick()
+  assert.equal(结果.超时, true)
+  assert.equal(上下文.调度器.firing, false)
+  assert.equal(上下文.调度器.phase, 'idle')
+  assert.equal(上下文.调度器.lastRestart.status, 'firing-timeout')
+  assert.equal(上下文.记录.注入.length, 1)
+  assert.match(上下文.记录.注入[0].文本, /重启确认超时/)
+})
+
+test('重启确认：未到超时仍保持 firing', async () => {
+  const 上下文 = 造调度器()
+  排任务(上下文.调度器)
+  await 上下文.调度器.触发(0)
+  上下文.时钟.走(restartConfirmTimeoutMs - 1)
+  const 结果 = await 上下文.调度器.tick()
+  assert.equal(结果.阶段, 'firing')
+  assert.equal(上下文.调度器.firing, true)
 })
 
 test('落盘：倒计时中按间隔节流，不每次都写', async () => {

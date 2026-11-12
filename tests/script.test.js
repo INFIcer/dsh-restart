@@ -103,17 +103,29 @@ test('脚本文本：包含杀进程、清 cookie、写唤醒事件、WMI 拉起
   assert.doesNotMatch(文本, /^\s*Start-Process/mi)
 })
 
-test('脚本文本：内嵌的唤醒事件 JSON 能被解析', () => {
+test('脚本文本：唤醒事件不由脚本做 JSON 往返覆盖', () => {
   const 文本 = 生成重启脚本文本({
     家目录: 'C:\\h',
     唤醒事件: [{ sessionId: 'session-a', wakeText: '继续', afterSeconds: 15 }],
   })
-  const 匹配 = 文本.match(/@'\r?\n([\s\S]*?)\r?\n'@/)
-  assert.notEqual(匹配, null)
-  const 事件 = JSON.parse(匹配[1])
-  assert.equal(事件.length, 1)
-  assert.equal(事件[0].sessionId, 'session-a')
-  assert.equal(事件[0].prompt, '继续')
+  assert.doesNotMatch(文本, /WriteAllText\(\$scheduleFile/)
+  assert.doesNotMatch(文本, /\$doc\.tables\.tasks/)
+  assert.doesNotMatch(文本, /Add-Member/)
+  // 脚本只做「原文件未被宿主改写时，用 .pending 原子替换」。
+  assert.match(文本, /\.pending/)
+  assert.match(文本, /\.base/)
+  assert.match(文本, /Move-Item -Force -LiteralPath \$pendingFile/)
+})
+
+test('脚本文本：先记录旧 PID，旧实例全死且只探新 PID 端口才算就绪', () => {
+  const 文本 = 生成重启脚本文本({ 家目录: 'C:\\h' })
+  assert.match(文本, /oldPids/)
+  assert.match(文本, /stop-failed/)
+  assert.match(文本, /\$result\.ProcessId/)
+  assert.match(文本, /Get-Process -Id \$dshPid/)
+  assert.match(文本, /-OwningProcess \$dshPid/)
+  // 成功判定不能再按进程名取第一个。
+  assert.doesNotMatch(文本, /Get-Process -Name 'DeepSeek Harness'[^\n]*-First 1/)
 })
 
 test('脚本文本：路径里的单引号被安全转义', () => {

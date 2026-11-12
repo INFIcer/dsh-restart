@@ -376,16 +376,23 @@ function 鼠标动了() {
   }, 鼠标恢复毫秒)
 }
 
+function 失焦了() {
+  // 窗口失焦/切后台时不该一直暂停着。
+  if (恢复定时器) {
+    clearTimeout(恢复定时器)
+    恢复定时器 = null
+  }
+  void 请求('/resume', { method: 'POST' })
+}
+
+/** 返回卸载函数：dispose 时必须摘掉挂在 document/window 上的监听，否则重装会叠加多份。 */
 function 挂鼠标监听() {
   document.addEventListener('mousemove', 鼠标动了, { passive: true })
-  // 窗口失焦/切后台时不该一直暂停着。
-  window.addEventListener('blur', () => {
-    if (恢复定时器) {
-      clearTimeout(恢复定时器)
-      恢复定时器 = null
-    }
-    void 请求('/resume', { method: 'POST' })
-  })
+  window.addEventListener('blur', 失焦了)
+  return function 卸鼠标监听() {
+    document.removeEventListener('mousemove', 鼠标动了, { passive: true })
+    window.removeEventListener('blur', 失焦了)
+  }
 }
 
 // ———————————————————————— 入口 ————————————————————————
@@ -402,16 +409,41 @@ function apply(ctx) {
       const 快照 = 界面.上次快照
       展开(快照)
     })
-    挂鼠标监听()
+    const 卸鼠标监听 = 挂鼠标监听()
     开始轮询()
 
-    // 插件卸载时停掉轮询（拿不到 effect 也没关系，setInterval 不会影响功能）。
+    // 插件卸载时把自己加的东西全部撤掉：定时器、全局监听、注入的节点，并复位装配标记，
+    // 这样同一个页面里重新 apply 能干净地再装一次。
     try {
       if (ctx && typeof ctx.effect === 'function') {
-        ctx.effect(() => () => {
-          if (轮询定时器) clearInterval(轮询定时器)
-          轮询定时器 = null
-        }, 'dsh-restart-plugin-client: poll')
+        ctx.effect(
+          () => () => {
+            try {
+              if (轮询定时器) clearInterval(轮询定时器)
+              轮询定时器 = null
+              if (恢复定时器) clearTimeout(恢复定时器)
+              恢复定时器 = null
+              if (界面.立即确认定时器) clearTimeout(界面.立即确认定时器)
+              界面.立即确认定时器 = null
+              卸鼠标监听()
+              for (const 编号 of [遮罩ID, 徽标ID, 样式ID]) {
+                const 节点 = document.getElementById(编号)
+                if (节点 && 节点.parentNode) 节点.parentNode.removeChild(节点)
+              }
+              界面.上次快照 = null
+              界面.上次任务数 = 0
+              界面.已请求抬秒 = false
+              界面.取消中.clear()
+              界面.立即确认 = false
+              界面.立即中 = false
+              界面.错误 = ''
+              已装配 = false
+            } catch {
+              /* 忽略 */
+            }
+          },
+          'dsh-restart-plugin-client: dispose',
+        )
       }
     } catch {
       /* 忽略 */
