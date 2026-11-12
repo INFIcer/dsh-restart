@@ -5,7 +5,15 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { 装配, 解析调用会话, 取忙碌会话, 会话标签, apply } from '../lib/host.js'
+import {
+  装配,
+  注册重启提示,
+  重启提示文本,
+  解析调用会话,
+  取忙碌会话,
+  会话标签,
+  apply,
+} from '../lib/host.js'
 import { 路由前缀, 默认延迟秒, 弹框最小剩余秒 } from '../lib/constants.js'
 import { 读JSON } from '../lib/fsutil.js'
 import { Readable } from 'node:stream'
@@ -79,12 +87,26 @@ function 造假ctx(选项 = {}) {
     },
   }
 
+  const 提示段 = []
+  const 提示服务 = {
+    section: (段) => {
+      提示段.push(段)
+      return () => {
+        const 序号 = 提示段.indexOf(段)
+        if (序号 >= 0) 提示段.splice(序号, 1)
+      }
+    },
+  }
+
   const ctx = {
     路由,
     工具,
     清理,
     注入记录,
+    提示段,
+    提示服务,
     get: (名) => {
+      if (名 === 'systemPrompt') return 选项.系统提示 === undefined ? 提示服务 : 选项.系统提示
       if (名 === 'agents') return 选项.agents === undefined ? agents : 选项.agents
       if (名 === 'sessions') {
         return {
@@ -582,3 +604,75 @@ test('会话标签：sessions 取不到时退回 agents 里的 session', () => {
   }
   assert.equal(会话标签(ctx, 'session-only-agent'), '只有代理能拿到')
 })
+
+// ———————————————————————— 系统提示（重启职责） ————————————————————————
+
+/** 假日志：把每条记录收进数组，方便断言降级说明。 */
+function 记录日志() {
+  const 记录 = []
+  const 收 = (级别) => (...参数) => { 记录.push({ 级别, 参数 }) }
+  return { 记录, 日志: { info: 收('info'), warn: 收('warn'), error: 收('error') } }
+}
+
+test('系统提示：注入重启提示段，内容指向 dsh_restart', (t) => {
+  const { ctx } = 造插件(t)
+  assert.equal(ctx.提示段.length, 1)
+  const 段 = ctx.提示段[0]
+  assert.equal(段.name, 'dsh-restart-guidance')
+  assert.equal(段.interpolate, false, '纯文本段要关掉 {{变量}} 插值')
+  assert.equal(typeof 段.order, 'number')
+  assert.equal(段.text, 重启提示文本)
+  assert.match(段.text, /dsh_restart/)
+  assert.match(段.text, /不要自己杀进程/)
+  assert.match(段.text, /所有会话空闲/)
+  // 不给具体的手动重启命令，也不写死端口/路径（插件会装在别人机器上）
+  assert.doesNotMatch(段.text, /taskkill|Stop-Process|schtasks\s+\/create/i)
+  assert.doesNotMatch(段.text, /[A-Za-z]:\\|\d+\.\d+\.\d+\.\d+|localhost:\d+/)
+})
+
+test('系统提示：systemPrompt 缺失时降级，工具照常注册', (t) => {
+  const { 记录, 日志 } = 记录日志()
+  const { ctx, 插件 } = 造插件(t, { ctx选项: { 系统提示: null }, 选项: { 日志 } })
+  assert.equal(ctx.提示段.length, 0)
+  assert.notEqual(取工具(ctx), undefined, 'dsh_restart 工具不受提示服务影响')
+  assert.ok(插件, '装配不因缺服务而失败')
+  assert.ok(
+    记录.some((项) => 项.级别 === 'warn' && String(项.参数[0]).includes('systemPrompt')),
+    '应在日志里说明降级原因',
+  )
+})
+
+test('系统提示：读取服务本身抛错也不抛', () => {
+  const { 记录, 日志 } = 记录日志()
+  const 撤 = 注册重启提示({ get() { throw new Error('boom') } }, 日志)
+  assert.equal(撤, null)
+  assert.ok(记录.some((项) => 项.级别 === 'warn' && String(项.参数[0]).includes('boom')))
+})
+
+test('系统提示：重名注册说明已注入，按幂等跳过', (t) => {
+  const { 记录, 日志 } = 记录日志()
+  const 服务 = {
+    section() {
+      throw new Error('prompt section "dsh-restart-guidance" is already registered (for a per-agent override, register through that agent\'s agent.ctx instead)')
+    },
+  }
+  const { ctx } = 造插件(t, { ctx选项: { 系统提示: 服务 }, 选项: { 日志 } })
+  assert.equal(ctx.提示段.length, 0)
+  assert.ok(记录.some((项) => 项.级别 === 'info' && String(项.参数[0]).includes('已注册')))
+})
+
+test('系统提示：注册抛别的错只记日志，不影响装配', (t) => {
+  const { 记录, 日志 } = 记录日志()
+  const 服务 = { section() { throw new Error('层已销毁') } }
+  const { ctx } = 造插件(t, { ctx选项: { 系统提示: 服务 }, 选项: { 日志 } })
+  assert.notEqual(取工具(ctx), undefined)
+  assert.ok(记录.some((项) => 项.级别 === 'warn' && String(项.参数[0]).includes('层已销毁')))
+})
+
+test('系统提示：插件停止时撤销提示段', (t) => {
+  const { ctx, 插件 } = 造插件(t)
+  assert.equal(ctx.提示段.length, 1)
+  插件.停止()
+  assert.equal(ctx.提示段.length, 0, '停止后不应残留提示段')
+})
+
