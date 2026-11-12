@@ -285,32 +285,95 @@ test('开机校验：没有快照时报错但不抛', (t) => {
 
 // ———————————————————————— profile 定位与文本小工具 ————————————————————————
 
+/** 造一个带 package.json 的 profile 候选；给了 pluginRoot 就把本插件 junction 进 node_modules。 */
+function makeCandidate(root, name, options = {}) {
+  const dir = path.join(root, 'profiles', name)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'package.json'), manifestText([]))
+  if (options.pluginRoot) {
+    const modules = path.join(dir, 'node_modules')
+    fs.mkdirSync(modules, { recursive: true })
+    fs.symlinkSync(options.pluginRoot, path.join(modules, 'dsh-restart-plugin'), 'junction')
+  }
+  return dir
+}
+
 test('定位 profile：显式参数优先，其次 DSH_PROFILE_DIR，再 DSH_PROFILE 拼家目录', (t) => {
   const root = tempDir(t)
-  const explicit = resolveProfileDir({ profileDir: path.join(root, 'a'), env: { DSH_PROFILE_DIR: path.join(root, 'b') } })
-  assert.equal(explicit.dir, path.resolve(root, 'a'))
+  const explicitDir = path.join(root, 'flavors', 'a')
+  const envDir = path.join(root, 'flavors', 'b')
+  const nameDir = path.join(root, 'profiles', 'alpha')
+  for (const dir of [explicitDir, envDir, nameDir]) {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'package.json'), manifestText([]))
+  }
+
+  const explicit = resolveProfileDir({ profileDir: explicitDir, env: { DSH_PROFILE_DIR: envDir } })
+  assert.equal(explicit.dir, path.resolve(explicitDir))
   assert.equal(explicit.source, 'option')
 
-  const fromEnv = resolveProfileDir({ env: { DSH_PROFILE_DIR: path.join(root, 'b'), DSH_PROFILE: 'other' }, homeDir: root })
-  assert.equal(fromEnv.dir, path.resolve(root, 'b'))
+  const fromEnv = resolveProfileDir({ env: { DSH_PROFILE_DIR: envDir, DSH_PROFILE: 'alpha' }, homeDir: root })
+  assert.equal(fromEnv.dir, path.resolve(envDir))
   assert.equal(fromEnv.source, 'env')
 
-  const fromName = resolveProfileDir({ env: { DSH_PROFILE: 'desktop' }, homeDir: root })
-  assert.equal(fromName.dir, path.join(root, 'profiles', 'desktop'))
+  const fromName = resolveProfileDir({ env: { DSH_PROFILE: 'alpha' }, homeDir: root })
+  assert.equal(fromName.dir, nameDir)
   assert.equal(fromName.source, 'profile')
+
+  // 显式目录没有 package.json 时不算 profile，继续往下一优先级找。
+  const fallback = resolveProfileDir({
+    profileDir: path.join(root, 'missing-profile'),
+    env: { DSH_PROFILE_DIR: envDir },
+  })
+  assert.equal(fallback.dir, path.resolve(envDir))
+  assert.equal(fallback.source, 'env')
 })
 
-test('定位 profile：都没给时探 profiles 下唯一目录，找不到就安全失败', (t) => {
+test('定位 profile：两个候选只有一个装了本插件时选它', (t) => {
   const root = tempDir(t)
-  makeProfile(root)
-  const probed = resolveProfileDir({ env: {}, homeDir: root })
-  assert.equal(probed.ok, true)
-  assert.equal(probed.dir, path.join(root, 'profiles', 'desktop'))
+  const pluginRoot = tempDir(t)
+  makeCandidate(root, 'desktop')
+  const linked = makeCandidate(root, 'web', { pluginRoot })
 
-  const emptyRoot = tempDir(t)
-  const missing = resolveProfileDir({ env: {}, homeDir: emptyRoot })
+  const result = resolveProfileDir({ env: {}, homeDir: root, pluginRoot })
+  assert.equal(result.ok, true)
+  assert.equal(result.dir, linked)
+  assert.equal(result.source, 'probe')
+})
+
+test('定位 profile：两个候选都装了本插件时优先 desktop', (t) => {
+  const root = tempDir(t)
+  const pluginRoot = tempDir(t)
+  const desktop = makeCandidate(root, 'desktop', { pluginRoot })
+  makeCandidate(root, 'web', { pluginRoot })
+
+  const result = resolveProfileDir({ env: {}, homeDir: root, pluginRoot })
+  assert.equal(result.ok, true)
+  assert.equal(result.dir, desktop)
+  assert.equal(result.source, 'probe')
+})
+
+test('定位 profile：候选都没装本插件时回落到唯一候选，多个候选则安全失败', (t) => {
+  const root = tempDir(t)
+  const only = makeCandidate(root, 'web')
+  const single = resolveProfileDir({ env: {}, homeDir: root })
+  assert.equal(single.ok, true)
+  assert.equal(single.dir, only)
+
+  const ambiguousRoot = tempDir(t)
+  makeCandidate(ambiguousRoot, 'web')
+  makeCandidate(ambiguousRoot, 'legacy')
+  const ambiguous = resolveProfileDir({ env: {}, homeDir: ambiguousRoot })
+  assert.equal(ambiguous.ok, false)
+  assert.equal(ambiguous.dir, '')
+})
+
+test('定位 profile：profiles 目录不存在时安全失败', (t) => {
+  const missing = resolveProfileDir({ env: {}, homeDir: tempDir(t) })
   assert.equal(missing.ok, false)
   assert.equal(missing.dir, '')
+  assert.equal(missing.source, 'none')
+  assert.match(missing.error, /无法确定当前 profile 目录/)
 })
 
 test('文本小工具：读 bundles、读 disabled 行、格式化时间戳', () => {

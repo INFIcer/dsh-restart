@@ -45,6 +45,8 @@ DSH 命令行 `dsh plugin` 对齐依赖时，会把已安装的 bundle 重新加
 
 旧进程退出到新进程启动之间是配置唯一的「空窗期」，写回放在这里，新进程读到的就是重启前的设置。快照或恢复失败只记日志，不影响重启本身；找不到 profile 或文件时安全跳过，不改动 `cordis.patch.yml` 的内容。
 
+profile 目录按固定顺序定位：显式传入 → `DSH_PROFILE_DIR` → `DSH_PROFILE` 拼家目录 → 扫描 `<DSH 家目录>/profiles`。扫描时优先选 `node_modules/dsh-restart-plugin` 能经 realpath 解析回本插件目录的候选（兼容 `link:` 安装），多个候选都命中时优先名为 `desktop` 的那个，都不命中时只接受唯一候选；每一步都要求目录里有 `package.json`。桌面端进程不设 `DSH_PROFILE_DIR`，靠这条顺序定位到托管当前实例的 profile。
+
 ## 重启成功如何判定
 
 脚本从 WMI `Win32_Process.Create` 拿到的是 Electron 入口进程，真正监听 Web GUI 端口的是它派生出来的子进程。因此就绪判定不能只看入口 PID 自己的端口，也不能按进程名扫：同名进程里既有渲染进程，也可能有还没退干净的旧实例。判定顺序是：
