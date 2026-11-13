@@ -1,7 +1,8 @@
-// 客户端界面：纯 DOM（不注册任何官方槽位，不 require react）。
+// 客户端界面：主界面用纯 DOM；只有「开机自启动」设置项必须注册到插件页槽位。
 //
 // 为什么要纯 DOM：用户讨厌抢占官方槽位，纯 DOM 挂一个 fixed 遮罩是改动最小、
 // 最不影响别的插件的方式（dsh-notify-me 已经证明这样能跑）。
+// 设置项没有纯 DOM 的入口，只能按 DSH 的插件页约定注册 plugins.item 槽位。
 //
 // 职责：
 //  - 每 400ms 轮询宿主 /dsh-restart/state，画模态框 / 左下悬浮条 / 倒计时；
@@ -28,6 +29,137 @@ const hintBottom = '60px'
 const hintMaxWidth = '225px'
 
 var assembled = false
+
+// 设置项需要 React；主界面不依赖它。模块加载时由 __ModuleLoader__ 的 require 注入，
+// 拿不到就只跳过设置项，倒计时面板照常工作。
+var dsrReact = null
+
+const settingsWrapStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '8px',
+  padding: '4px 0',
+  fontSize: '13px',
+  lineHeight: 1.5,
+}
+const settingsTitleStyle = { fontSize: '15px', fontWeight: 600 }
+const settingsRowStyle = { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }
+const settingsDimStyle = {
+  color: 'var(--dsw-alias-label-secondary, rgba(0, 0, 0, .6))',
+  fontSize: '12px',
+  wordBreak: 'break-all',
+}
+const settingsErrorStyle = { color: '#c0392b', fontSize: '12px' }
+const settingsOkStyle = { color: 'var(--dsw-alias-state-business-primary, #2f8f5b)', fontSize: '12px' }
+
+/** 插件页卡片摘要：只说这个插件能做什么。 */
+function AutoStartCard(props) {
+  if (props && props.view === 'summary') {
+    return dsrReact.createElement('div', null, '登录 Windows 后自动启动 DSH。')
+  }
+  return dsrReact.createElement(AutoStartSettings, null)
+}
+
+/** 设置项本体：一个开关；状态从宿主读，改动立刻写回。 */
+function AutoStartSettings() {
+  const [state, setState] = dsrReact.useState({
+    loading: true,
+    loaded: false,
+    configured: false,
+    enabled: false,
+    command: '',
+    error: '',
+    saving: false,
+    saved: '',
+  })
+
+  dsrReact.useEffect(() => {
+    let alive = true
+    request('/state').then((body) => {
+      if (!alive) return
+      const info = body && body.autoStart && typeof body.autoStart === 'object' ? body.autoStart : null
+      if (!info) {
+        setState((previous) => ({
+          ...previous,
+          loading: false,
+          loaded: false,
+          error: '没能读取当前设置。请稍后重试。',
+        }))
+        return
+      }
+      setState({
+        loading: false,
+        loaded: true,
+        configured: info.configured === true,
+        enabled: info.enabled === true,
+        command: typeof info.command === 'string' ? info.command : '',
+        error: typeof info.error === 'string' ? info.error : '',
+        saving: false,
+        saved: '',
+      })
+    })
+    return () => { alive = false }
+  }, [])
+
+  const onToggle = async (event) => {
+    const next = Boolean(event && event.target && event.target.checked)
+    setState((previous) => ({ ...previous, saving: true, error: '', saved: '' }))
+    const body = await request('/autostart', { method: 'POST', body: { enabled: next } })
+    if (body && body.ok) {
+      const info = body.autoStart && typeof body.autoStart === 'object' ? body.autoStart : null
+      setState({
+        loading: false,
+        loaded: true,
+        configured: info ? info.configured === true : next,
+        enabled: info ? info.enabled === true : next,
+        command: info && typeof info.command === 'string' ? info.command : '',
+        error: '',
+        saving: false,
+        saved: '设置已保存。',
+      })
+      return
+    }
+    const message =
+      body && body.code && typeof body.error === 'string' ? body.error : '没能保存设置。请稍后重试。'
+    setState((previous) => ({ ...previous, saving: false, error: message, saved: '' }))
+  }
+
+  let status = '已关闭'
+  if (state.loading) status = '正在读取当前状态…'
+  else if (state.saving) status = '正在保存…'
+  else if (!state.loaded) status = '暂时读不到当前状态'
+  else if (state.configured && !state.enabled) status = '已设置为开启，但启动项还没生效。'
+  else if (!state.configured && state.enabled) status = '已设置为关闭，但启动项还在。'
+  else if (state.enabled) status = '已开启'
+
+  const children = [
+    dsrReact.createElement('div', { key: 'title', style: settingsTitleStyle }, '开机自启动'),
+    dsrReact.createElement(
+      'label',
+      { key: 'row', style: settingsRowStyle },
+      dsrReact.createElement('input', {
+        type: 'checkbox',
+        checked: state.configured,
+        disabled: state.loading || state.saving,
+        onChange: onToggle,
+      }),
+      dsrReact.createElement('span', null, '登录 Windows 后自动启动 DSH。'),
+    ),
+    dsrReact.createElement('div', { key: 'status', style: settingsDimStyle }, status),
+  ]
+  if (state.enabled && state.command) {
+    children.push(
+      dsrReact.createElement('div', { key: 'command', style: settingsDimStyle }, '启动的程序：' + state.command),
+    )
+  }
+  if (state.error) {
+    children.push(dsrReact.createElement('div', { key: 'error', style: settingsErrorStyle, role: 'alert' }, state.error))
+  }
+  if (state.saved) {
+    children.push(dsrReact.createElement('div', { key: 'saved', style: settingsOkStyle }, state.saved))
+  }
+  return dsrReact.createElement('div', { style: settingsWrapStyle }, children)
+}
 
 /** 造元素的小工具：属性都用 textContent，避免把会话标题当 HTML 解析（防 XSS）。 */
 function makeEl(label, className, text) {
@@ -632,6 +764,32 @@ function apply(ctx) {
     const unmountMouseListeners = mountMouseListeners()
     startPolling()
 
+    // 设置项只能注册到 DSH 的插件页槽位；主界面仍然不占任何槽位。
+    let disposeCard = null
+    let disposeSlots = null
+    try {
+      const slots = ctx && typeof ctx.get === 'function' ? ctx.get('slots') : undefined
+      if (dsrReact && slots && typeof slots.inject === 'function' && typeof slots.register === 'function') {
+        const injected = slots.inject('plugins.item', () => {
+          disposeCard = slots.register(
+            { name: 'plugins.item', id: 'restart', order: 20, label: () => '重启' },
+            AutoStartCard,
+          )
+          return disposeCard
+        })
+        disposeSlots = () => {
+          if (typeof disposeCard === 'function') disposeCard()
+          if (typeof injected === 'function' && injected !== disposeCard) injected()
+        }
+      }
+    } catch (error) {
+      try {
+        console.warn('[dsh-restart-plugin] 注册设置项失败（已忽略）:', error)
+      } catch {
+        /* 忽略 */
+      }
+    }
+
     // 插件卸载时把自己加的东西全部撤掉：定时器、全局监听、注入的节点，并复位装配标记，
     // 这样同一个页面里重新 apply 能干净地再装一次。
     try {
@@ -646,6 +804,10 @@ function apply(ctx) {
               if (ui.nowConfirmTimer) clearTimeout(ui.nowConfirmTimer)
               ui.nowConfirmTimer = null
               unmountMouseListeners()
+              if (typeof disposeSlots === 'function') {
+                try { disposeSlots() } catch { /* 已卸载 */ }
+                disposeSlots = null
+              }
               for (const id of [overlayId, hintId, styleId]) {
                 const node = document.getElementById(id)
                 if (node && node.parentNode) node.parentNode.removeChild(node)
@@ -680,7 +842,8 @@ function apply(ctx) {
   }
 }
 
-var inject = []
+// 设置项依赖 slots 服务；主界面本身不依赖任何宿主服务。
+var inject = ['slots']
 
 // 浏览器里由 __ModuleLoader__ 调用 factory（客户端 bundle 是 classic script，
 // 不能用 ESM export；注册必须发生在脚本执行时，否则宿主会认为该 bundle 没注册）。
@@ -695,7 +858,14 @@ try {
   if (typeof window !== 'undefined' && window.__ModuleLoader__ && typeof window.__ModuleLoader__.load === 'function') {
     window.__ModuleLoader__.load({
       id: 'dsh-restart-plugin',
-      factory: () => mod.exports,
+      factory: (require) => {
+        try {
+          dsrReact = require('react')
+        } catch {
+          dsrReact = null
+        }
+        return mod.exports
+      },
     })
   }
 } catch (error) {

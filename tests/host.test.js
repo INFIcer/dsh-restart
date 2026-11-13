@@ -23,6 +23,7 @@ import {
   dialogMinRemainingSeconds,
 } from '../lib/constants.js'
 import { readJson } from '../lib/fsutil.js'
+import { ConfigStore } from '../lib/config.js'
 import { createPluginSnapshot } from '../lib/plugin-state.js'
 import { makeFakeSpawn, makeClock, makeTimers } from './helpers.js'
 import { Readable } from 'node:stream'
@@ -157,6 +158,39 @@ function makeFakeCtx(options = {}) {
   return ctx
 }
 
+/** 假注册表 runner：默认什么值都没有，测试绝不会碰真实注册表。 */
+function makeRegistryRunner(initialCommand = null) {
+  let command = initialCommand
+  const calls = []
+  async function run(itemName, args) {
+    calls.push([itemName, args.slice()])
+    if (args[0] === 'query') {
+      if (command === null) {
+        return { ok: false, code: 1, stdout: '', stderr: 'ERROR: The system was unable to find the specified registry key or value.' }
+      }
+      return {
+        ok: true,
+        code: 0,
+        stdout: 'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\r\n    DeepSeekHarness    REG_SZ    ' + command + '\r\n',
+        stderr: '',
+      }
+    }
+    if (args[0] === 'add') {
+      command = args[args.indexOf('/d') + 1]
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+    if (args[0] === 'delete') {
+      if (command === null) {
+        return { ok: false, code: 1, stdout: '', stderr: 'ERROR: The system was unable to find the specified registry key or value.' }
+      }
+      command = null
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+    return { ok: false, code: 1, stdout: '', stderr: '' }
+  }
+  return { run, calls, getCommand: () => command, setCommand: (value) => { command = value } }
+}
+
 /** 装配一套临时路径 + 假 onFire + 长心跳。 */
 function makePlugin(t, override = {}) {
   const dir = override.dir || tempDir(t)
@@ -178,6 +212,13 @@ function makePlugin(t, override = {}) {
     onFire: async (payload) => {
       fire.push(payload)
       return { ok: true, scriptPath: options.scriptFile, launcher: 'schtasks', wakeCount: (payload?.sessionIds || []).length }
+    },
+    // 配置与启动项都指到临时目录/假 runner：测试不得读写真实注册表或真实配置。
+    configStore: new ConfigStore({ filePath: path.join(dir, 'restart-config.json') }),
+    autoStart: {
+      run: async () => ({ ok: false, code: 1, stdout: '', stderr: 'ERROR: The system was unable to find the specified registry key or value.' }),
+      execPath: 'D:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe',
+      platform: 'win32',
     },
     ...override.options,
   }
@@ -206,10 +247,11 @@ function getTool(ctx) {
 
 // ———————————————————————— 注册与契约 ————————————————————————
 
-test('装配：注册 6 条 exact 路由', (t) => {
+test('装配：注册 7 条 exact 路由', (t) => {
   const { ctx } = makePlugin(t)
   const filePath = ctx.route.map((item) => item.path).sort()
   assert.deepEqual(filePath, [
+    `${routePrefix}/autostart`,
     `${routePrefix}/cancel`,
     `${routePrefix}/dialog-open`,
     `${routePrefix}/now`,
@@ -492,7 +534,8 @@ test('工具：未知 action 返回 bad_request', async (t) => {
 // ———————————————————————— 路由：state ————————————————————————
 
 test('路由 state：GET 返回快照与常量', async (t) => {
-  const { ctx } = makePlugin(t)
+  const { ctx, plugin } = makePlugin(t)
+  await plugin.autoStartReady
   const res = await callRoute(ctx, '/state', fakeRequest('GET'))
   assert.equal(res.statusCode, 200)
   const body = JSON.parse(res.body)
@@ -500,12 +543,106 @@ test('路由 state：GET 返回快照与常量', async (t) => {
   assert.equal(body.constants.defaultDelaySeconds, defaultDelaySeconds)
   assert.equal(Array.isArray(body.tasks), true)
   assert.match(body.serverTime, /^\d{4}-\d{2}-\d{2}T/)
+  assert.deepEqual(body.autoStart, {
+    enabled: false,
+    configured: false,
+    command: '',
+    error: '',
+    checkedAt: body.autoStart.checkedAt,
+    supported: true,
+  })
+  assert.match(body.autoStart.checkedAt, /^\d{4}-\d{2}-\d{2}T/)
 })
 
 test('路由 state：POST 回 405', async (t) => {
   const { ctx } = makePlugin(t)
   const res = await callRoute(ctx, '/state', fakeRequest('POST'))
   assert.equal(res.statusCode, 405)
+})
+
+// ———————————————————————— 路由：autostart ————————————————————————
+
+test('路由 autostart：开启写入带引号路径并保存配置', async (t) => {
+  const exe = 'D:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe'
+  const runner = makeRegistryRunner(null)
+  const { ctx, plugin } = makePlugin(t, {
+    options: { autoStart: { run: runner.run, execPath: exe, platform: 'win32' } },
+  })
+  await plugin.autoStartReady
+  const res = await callRoute(ctx, '/autostart', fakeRequest('POST', JSON.stringify({ enabled: true })))
+  assert.equal(res.statusCode, 200)
+  const body = JSON.parse(res.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.changed, true)
+  assert.equal(body.autoStart.configured, true)
+  assert.equal(body.autoStart.enabled, true)
+  assert.equal(body.autoStart.command, '"' + exe + '"')
+  const addCall = runner.calls.find(([, args]) => args[0] === 'add')
+  assert.notEqual(addCall, undefined)
+  const addArgs = addCall[1]
+  assert.equal(addArgs[addArgs.indexOf('/d') + 1], '"' + exe + '"')
+  const saved = readJson(plugin.configStore.filePath, null)
+  assert.equal(saved.autoStart, true)
+})
+
+test('路由 autostart：关闭删除启动项并保存配置', async (t) => {
+  const exe = 'D:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe'
+  const dir = tempDir(t)
+  fs.writeFileSync(path.join(dir, 'restart-config.json'), JSON.stringify({ version: 1, autoStart: true }))
+  const runner = makeRegistryRunner('"' + exe + '"')
+  const { ctx, plugin } = makePlugin(t, {
+    dir,
+    options: { autoStart: { run: runner.run, execPath: exe, platform: 'win32' } },
+  })
+  await plugin.autoStartReady
+  const res = await callRoute(ctx, '/autostart', fakeRequest('POST', JSON.stringify({ enabled: false })))
+  assert.equal(res.statusCode, 200)
+  const body = JSON.parse(res.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.changed, true)
+  assert.equal(body.autoStart.configured, false)
+  assert.equal(body.autoStart.enabled, false)
+  assert.equal(runner.getCommand(), null)
+  assert.equal(runner.calls.some(([, args]) => args[0] === 'delete'), true)
+  assert.equal(readJson(path.join(dir, 'restart-config.json'), null).autoStart, false)
+})
+
+test('路由 autostart：参数不是布尔时回 400', async (t) => {
+  const { ctx } = makePlugin(t)
+  const res = await callRoute(ctx, '/autostart', fakeRequest('POST', JSON.stringify({ enabled: 'yes' })))
+  assert.equal(res.statusCode, 400)
+  const body = JSON.parse(res.body)
+  assert.equal(body.ok, false)
+  assert.equal(body.code, 'bad_request')
+})
+
+test('装配：配置开启但启动项缺失时，加载即补齐', async (t) => {
+  const exe = 'D:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe'
+  const dir = tempDir(t)
+  fs.writeFileSync(path.join(dir, 'restart-config.json'), JSON.stringify({ version: 1, autoStart: true }))
+  const runner = makeRegistryRunner(null)
+  const { plugin } = makePlugin(t, {
+    dir,
+    options: { autoStart: { run: runner.run, execPath: exe, platform: 'win32' } },
+  })
+  await plugin.autoStartReady
+  assert.equal(runner.getCommand(), '"' + exe + '"')
+  assert.equal(plugin.autoStartState.enabled, true)
+  assert.equal(plugin.autoStartState.configured, true)
+  assert.equal(runner.calls.some(([, args]) => args[0] === 'add'), true)
+})
+
+test('装配：配置关闭但启动项残留时，加载即删除', async (t) => {
+  const exe = 'D:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe'
+  const runner = makeRegistryRunner('"' + exe + '"')
+  const { plugin } = makePlugin(t, {
+    options: { autoStart: { run: runner.run, execPath: exe, platform: 'win32' } },
+  })
+  await plugin.autoStartReady
+  assert.equal(runner.getCommand(), null)
+  assert.equal(plugin.autoStartState.enabled, false)
+  assert.equal(plugin.autoStartState.configured, false)
+  assert.equal(runner.calls.some(([, args]) => args[0] === 'delete'), true)
 })
 
 // ———————————————————————— 路由：pause / resume ————————————————————————
