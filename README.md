@@ -134,6 +134,8 @@ profile 目录按固定顺序定位：显式传入 → `DSH_PROFILE_DIR` → `DS
 
 标识符、文件名、配置键、日志 key 一律用英文。注释、docstring 和本文档一律用中文，只写原理、不变量与边界，不写日期、讨论过程或个人备忘。面向用户的文案（面板文字、注入反馈、错误提示）不算代码，保持原样。
 
+工具的参数与返回 schema 只用宿主支持的子集：`type` / `oneOf` / `properties` / `required` / `additionalProperties` / `items` / `enum` / `const`，外加 `description` / `title` / `default` / `examples`。宿主把 schema 直接投成系统提示里的 TypeScript 声明，出现子集外的关键字（`minimum`、`maximum` 之类）时整段参数类型会降级成 `unknown`，而调用照旧成功——退化只在系统提示里可见。所以数值范围写进 `description`，真正的限制由 `normalizeDelaySeconds` 在运行时夹取；`tests/host.test.js` 里有一条用例守住这个关键字集合。
+
 ## 已知缺陷
 
 - 只支持 Windows。

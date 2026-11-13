@@ -15,7 +15,13 @@ import {
   sessionLabel,
   apply,
 } from '../lib/host.js'
-import { routePrefix, defaultDelaySeconds, dialogMinRemainingSeconds } from '../lib/constants.js'
+import {
+  routePrefix,
+  defaultDelaySeconds,
+  minDelaySeconds,
+  maxDelaySeconds,
+  dialogMinRemainingSeconds,
+} from '../lib/constants.js'
 import { readJson } from '../lib/fsutil.js'
 import { createPluginSnapshot } from '../lib/plugin-state.js'
 import { makeFakeSpawn, makeClock, makeTimers } from './helpers.js'
@@ -251,6 +257,50 @@ test('装配：工具 output 有宽松 schema 与 render', (t) => {
   const rendered = tool.output.render({}, { ok: true })
   assert.equal(rendered[0].type, 'text')
   assert.match(rendered[0].text, /"ok": true/)
+})
+
+// 宿主把 parameters 与 output.schema 直接投成系统提示里的 TypeScript 声明，只认它自己那份子集。
+// 出现子集外的关键字（minimum、maximum 之类）时整段类型会被降级成 unknown，而调用照旧成功——
+// 退化只体现在系统提示里，肉眼很难发现，所以在这里机械守住关键字集合。
+const SUPPORTED_SCHEMA_KEYWORDS = new Set([
+  'type',
+  'oneOf',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'enum',
+  'const',
+  'description',
+  'title',
+  'default',
+  'examples',
+])
+
+/** 递归收集 schema 里子集外的关键字，返回形如 parameters.properties.delaySeconds.minimum 的位置。 */
+function collectUnsupportedKeywords(schema, atPath, found = []) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return found
+  for (const key of Object.keys(schema)) {
+    if (!SUPPORTED_SCHEMA_KEYWORDS.has(key)) found.push(`${atPath}.${key}`)
+  }
+  for (const [name, child] of Object.entries(schema.properties || {})) {
+    collectUnsupportedKeywords(child, `${atPath}.properties.${name}`, found)
+  }
+  collectUnsupportedKeywords(schema.items, `${atPath}.items`, found)
+  for (const [index, child] of (schema.oneOf || []).entries()) {
+    collectUnsupportedKeywords(child, `${atPath}.oneOf[${index}]`, found)
+  }
+  return found
+}
+
+test('装配：工具 schema 只用宿主支持的子集（超出会让生成的参数类型退化成 unknown）', (t) => {
+  const { ctx } = makePlugin(t)
+  const tool = getTool(ctx)
+  assert.deepEqual(collectUnsupportedKeywords(tool.parameters, 'parameters'), [])
+  assert.deepEqual(collectUnsupportedKeywords(tool.output.schema, 'output.schema'), [])
+  const delaySeconds = tool.parameters.properties.delaySeconds
+  assert.equal(delaySeconds.type, 'integer')
+  assert.match(delaySeconds.description, new RegExp(`${minDelaySeconds}~${maxDelaySeconds}`))
 })
 
 test('装配：心跳启动后停止能清掉定时器', (t) => {
