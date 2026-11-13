@@ -266,24 +266,30 @@ test('apply：ctx 为 null 也不抛（fail-open）', () => {
 
 // ———————————————————————— 工具：status ————————————————————————
 
-test('工具 status：没有任务时给出空提示', async (t) => {
+test('工具 status：没有任务时返回空列表', async (t) => {
   const { ctx } = makePlugin(t)
   const result = await getTool(ctx).execute({ action: 'status' })
   assert.equal(result.ok, true)
-  assert.deepEqual(result.task, [])
-  assert.match(result.hint, /没有任何重启任务/)
+  assert.equal(result.taskCount, 0)
+  assert.deepEqual(result.tasks, [])
+  assert.equal(result.hint, undefined)
 })
 
-test('工具 status：列出多个任务', async (t) => {
+test('工具 status：列出多个任务，不回显备注', async (t) => {
   const { ctx } = makePlugin(t, { options: { onFire: null } })
   const tool = getTool(ctx)
   await tool.execute({ action: 'schedule', delaySeconds: 10, reason: '甲' }, { agent: { session: { id: 'session-a' } } })
   await tool.execute({ action: 'schedule', delaySeconds: 20, reason: '乙' }, { agent: { session: { id: 'session-b' } } })
   const result = await tool.execute({ action: 'status' })
   assert.equal(result.ok, true)
-  assert.equal(result.task.length, 2)
-  assert.deepEqual(result.task.map((item) => item.reason).sort(), ['甲', '乙'].sort())
-  assert.match(result.hint, /共 2 个任务/)
+  assert.equal(result.taskCount, 2)
+  assert.deepEqual(result.tasks.map((item) => item.session).sort(), ['a', 'b'])
+  for (const item of result.tasks) {
+    assert.match(item.id, /^restart-/)
+    assert.equal(item.reason, undefined)
+    assert.equal(item.wakeText, undefined)
+  }
+  assert.equal(result.hint, undefined)
 })
 
 test('工具 status：显示暂停状态', async (t) => {
@@ -291,39 +297,76 @@ test('工具 status：显示暂停状态', async (t) => {
   await getTool(ctx).execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
   plugin.scheduler.pause('mouse')
   const result = await getTool(ctx).execute({ action: 'status' })
-  assert.equal(result.pause, true)
+  assert.equal(result.paused, true)
 })
 
 // ———————————————————————— 工具：schedule ————————————————————————
 
-test('工具 schedule：记录调用会话与延迟', async (t) => {
-  const { ctx } = makePlugin(t)
+test('工具 schedule：只返回结果，不回显输入参数', async (t) => {
+  const { ctx, plugin } = makePlugin(t)
   const result = await getTool(ctx).execute(
     { action: 'schedule', delaySeconds: 30, wakeText: '起来了', reason: '装插件' },
     { agent: { session: { id: 'session-abc' } } },
   )
   assert.equal(result.ok, true)
   assert.equal(result.action, 'schedule')
-  assert.equal(result.task.sessionId, 'session-abc')
-  assert.equal(result.task.delaySeconds, 30)
-  assert.equal(result.task.wakeText, '起来了')
-  assert.match(result.hint, /30 秒后重启/)
+  assert.match(result.taskId, /^restart-/)
+  assert.equal(result.taskId, plugin.scheduler.tasks[0].id)
+  assert.equal(result.phase, 'waiting')
+  assert.equal(result.busyCount, 0)
+  assert.equal(result.remainingSeconds, null)
+  assert.match(result.createdAt, /^\d{4}-\d{2}-\d{2}T/)
+  assert.equal(result.task, undefined)
+  assert.equal(result.note, undefined)
+  assert.equal(result.delaySeconds, undefined)
+  assert.equal(result.wakeText, undefined)
+  assert.equal(result.reason, undefined)
+  assert.doesNotMatch(JSON.stringify(result), /装插件|起来了/)
+  assert.match(result.hint, /status/)
 })
 
 test('工具 schedule：不写延迟就用默认 60 秒', async (t) => {
-  const { ctx } = makePlugin(t)
+  const { ctx, plugin } = makePlugin(t)
   const result = await getTool(ctx).execute({ action: 'schedule' }, { agent: { id: 'session-x' } })
-  assert.equal(result.task.delaySeconds, defaultDelaySeconds)
+  assert.equal(result.taskId, plugin.scheduler.tasks[0].id)
+  assert.equal(plugin.scheduler.tasks[0].delaySeconds, defaultDelaySeconds)
 })
 
-test('工具 schedule：有其他会话在跑时提示先排队', async (t) => {
+test('工具 schedule：有其他会话在跑时如实返回繁忙数', async (t) => {
   const ctx = makeFakeCtx({ sessionStates: [['session-a', 'running'], ['session-b', 'running']] })
   const { plugin } = makePlugin(t, { ctx, options: { onFire: null } })
   const result = await getTool(ctx).execute({ action: 'schedule', delaySeconds: 15 }, { agent: { session: { id: 'session-a' } } })
   assert.equal(result.phase, 'waiting')
   assert.equal(result.busyCount, 2)
-  assert.match(result.hint, /排队/)
+  assert.doesNotMatch(result.hint, /排队/)
   assert.equal(plugin.scheduler.tasks.length, 1)
+})
+
+test('触发重启：唤醒事件只报完成，重启意图不进 schedule.json', async (t) => {
+  const dir = tempDir(t)
+  const scheduleFile = path.join(dir, 'storages', 'schedule.json')
+  fs.mkdirSync(path.dirname(scheduleFile), { recursive: true })
+  fs.writeFileSync(scheduleFile, JSON.stringify({ tables: { tasks: {} } }), 'utf8')
+  const { plugin } = makePlugin(t, {
+    dir,
+    options: {
+      onFire: undefined,
+      scheduleFilePath: scheduleFile,
+      spawnImpl: makeFakeSpawn([{ code: 0 }]),
+    },
+  })
+  plugin.scheduler.scheduleTask({ sessionId: 'session-a', wakeText: '记得装插件', reason: '装插件' })
+
+  const fired = await plugin.scheduler.fire(0)
+  assert.equal(fired.ok, true)
+
+  const doc = JSON.parse(fs.readFileSync(scheduleFile, 'utf8'))
+  const entries = Object.values(doc.tables.tasks)
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].record.prompt, `DSH 已重启完成（运行记录 ${fired.runId}）。`)
+  assert.doesNotMatch(fs.readFileSync(scheduleFile, 'utf8'), /记得装插件/)
+  assert.equal(plugin.scheduler.lastRestart.tasks[0].wakeText, undefined)
+  assert.equal(readJson(path.join(dir, 'restart-scheduler.json')).lastRestart.tasks[0].wakeText, undefined)
 })
 
 // ———————————————————————— 工具：cancel ————————————————————————
@@ -342,7 +385,7 @@ test('工具 cancel：有任务没 taskId 时列出 id', async (t) => {
   const scheduleCall = await tool.execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
   const result = await tool.execute({ action: 'cancel' })
   assert.equal(result.ok, false)
-  assert.match(result.hint, new RegExp(scheduleCall.task.id))
+  assert.match(result.hint, new RegExp(scheduleCall.taskId))
 })
 
 test('工具 cancel：taskId 不存在返回 not_found', async (t) => {
@@ -357,10 +400,14 @@ test('工具 cancel：取消成功并给会话注入反馈', async (t) => {
   const { ctx: useCtx } = makePlugin(t, { ctx })
   const tool = getTool(useCtx)
   const scheduleCall = await tool.execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
-  const result = await tool.execute({ action: 'cancel', taskId: scheduleCall.task.id }, { agent: { session: { id: 'session-a' } } })
+  const result = await tool.execute({ action: 'cancel', taskId: scheduleCall.taskId }, { agent: { session: { id: 'session-a' } } })
   assert.equal(result.ok, true)
+  assert.equal(result.taskId, scheduleCall.taskId)
+  assert.equal(result.task, undefined)
+  assert.equal(result.hint, undefined)
   assert.equal(result.feedbackDelivered, true)
   assert.equal(result.remainingTaskCount, 0)
+  assert.equal(result.phase, 'idle')
   assert.equal(useCtx.injectLog.length, 1)
   assert.equal(useCtx.injectLog[0].session, 'session-a')
   assert.match(useCtx.injectLog[0].message.content[0].text, /取消/)
@@ -370,10 +417,10 @@ test('工具 cancel：会话不在线时如实说反馈没送达', async (t) => 
   const { ctx } = makePlugin(t)
   const tool = getTool(ctx)
   const scheduleCall = await tool.execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-offline' } } })
-  const result = await tool.execute({ action: 'cancel', taskId: scheduleCall.task.id })
+  const result = await tool.execute({ action: 'cancel', taskId: scheduleCall.taskId })
   assert.equal(result.ok, true)
   assert.equal(result.feedbackDelivered, false)
-  assert.match(result.hint, /没送达/)
+  assert.equal(result.hint, undefined)
 })
 
 // ———————————————————————— 工具：参数校验 ————————————————————————
@@ -458,7 +505,7 @@ test('路由 pause：伪造 Origin 被 403 拒绝且不改变状态', async (t) 
 test('路由 cancel：伪造 Origin 被 403 拒绝且任务不变', async (t) => {
   const { ctx, plugin } = makePlugin(t)
   const scheduleCall = await getTool(ctx).execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
-  const res = await callRoute(ctx, '/cancel', fakeRequest('POST', JSON.stringify({ taskId: scheduleCall.task.id }), {
+  const res = await callRoute(ctx, '/cancel', fakeRequest('POST', JSON.stringify({ taskId: scheduleCall.taskId }), {
     host: '127.0.0.1:13066',
     origin: 'http://evil.example',
   }))
@@ -536,7 +583,7 @@ test('路由 cancel：成功回 200 并注入反馈', async (t) => {
   const ctx = makeFakeCtx({ sessionStates: [['session-a', 'idle']] })
   const { ctx: useCtx } = makePlugin(t, { ctx })
   const scheduleCall = await getTool(useCtx).execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
-  const res = await callRoute(useCtx, '/cancel', fakeRequest('POST', JSON.stringify({ taskId: scheduleCall.task.id })))
+  const res = await callRoute(useCtx, '/cancel', fakeRequest('POST', JSON.stringify({ taskId: scheduleCall.taskId })))
   assert.equal(res.statusCode, 200)
   assert.equal(JSON.parse(res.body).feedbackDelivered, true)
   assert.equal(useCtx.injectLog.length, 1)
@@ -609,7 +656,7 @@ test('装配：启动时从状态文件恢复任务', (t) => {
   assert.equal(plugin.scheduler.tasks[0].remainingMs, 20000)
 })
 
-test('装配：上次重启已完成的记录会触发开机汇报', async (t) => {
+test('装配：上次重启已完成时插件不再注入完成消息', async (t) => {
   const dir = tempDir(t)
   const ctx = makeFakeCtx({ sessionStates: [['session-a', 'idle']] })
   fs.writeFileSync(
@@ -626,21 +673,17 @@ test('装配：上次重启已完成的记录会触发开机汇报', async (t) =
         firedAt: new Date().toISOString(),
         tasks: [{ id: 'restart-old', sessionId: 'session-a' }],
         sessionIds: ['session-a'],
-        reported: false,
       },
     }),
     'utf8',
   )
   makePlugin(t, { ctx, dir })
-  // 开机汇报延迟 10ms 后发出
+  // 唤醒消息由宿主按 schedule.json 投递，插件自己不应再注入一条。
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 60))
-  assert.equal(ctx.injectLog.length, 1)
-  assert.match(ctx.injectLog[0].message.content[0].text, /DSH 已重启完成/)
-  const diskState = readJson(path.join(dir, 'restart-scheduler.json'))
-  assert.equal(diskState.lastRestart.reported, true)
+  assert.equal(ctx.injectLog.length, 0)
 })
 
-test('装配：开机标记稍后才确认时补排开机汇报', async (t) => {
+test('装配：开机标记迟到确认只更新状态，不注入', async (t) => {
   const dir = tempDir(t)
   const ctx = makeFakeCtx({ sessionStates: [['session-a', 'idle']] })
   const clock = makeClock(0)
@@ -666,13 +709,13 @@ test('装配：开机标记稍后才确认时补排开机汇报', async (t) => {
   )
   fs.writeFileSync(path.join(dir, 'restart-scheduler-marker.json'), JSON.stringify({ status: 'launched' }), 'utf8')
 
-  makePlugin(t, {
+  const { plugin } = makePlugin(t, {
     ctx,
     dir,
     options: { now: clock.now, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout },
   })
 
-  // 启动时标记还没到终态：先保持 firing，不汇报。
+  assert.equal(plugin.scheduler.lastRestart.status, 'firing')
   assert.equal(ctx.injectLog.length, 0)
 
   fs.writeFileSync(
@@ -682,11 +725,10 @@ test('装配：开机标记稍后才确认时补排开机汇报', async (t) => {
   )
   timers.advance(600)
 
-  // 汇报本身走真实定时器（reportRetryMs=10），等它送出。
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 60))
-  assert.equal(ctx.injectLog.length, 1)
-  assert.match(ctx.injectLog[0].message.content[0].text, /DSH 已重启完成/)
-  assert.equal(readJson(path.join(dir, 'restart-scheduler.json')).lastRestart.reported, true)
+  assert.equal(plugin.scheduler.lastRestart.status, 'restarted')
+  assert.equal(plugin.scheduler.bootRecord.confirmed, true)
+  assert.equal(ctx.injectLog.length, 0)
+  assert.equal(readJson(path.join(dir, 'restart-scheduler.json')).lastRestart.status, 'restarted')
 })
 
 // ———————————————————————— 插件启用设置保护 ————————————————————————

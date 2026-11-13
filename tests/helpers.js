@@ -74,7 +74,6 @@ export function makeScheduler(options = {}) {
     fire: [],
     marker: options.marker ?? null,
     log: [],
-    bootConfirmed: [],
   }
   // 磁盘状态默认补上当前结构版本，避免每个用例都手写；显式传 version 时保留原值（测版本不兼容）。
   let stateOnDisk =
@@ -106,7 +105,6 @@ export function makeScheduler(options = {}) {
     },
     setTimeout: timers.setTimeout,
     clearTimeout: timers.clearTimeout,
-    onBootConfirmed: () => record.bootConfirmed.push(clock.value),
     logger: {
       info: (...params) => record.log.push(['info', ...params]),
       warn: (...params) => record.log.push(['warn', ...params]),

@@ -2,13 +2,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { normalizeWakeText } from '../lib/text.js'
-import { defaultWakeText, wakeTextMaxLength } from '../lib/constants.js'
+import { wakeTextMaxLength } from '../lib/constants.js'
 
-test('normalizeWakeText：空值回落到默认文本', () => {
-  assert.equal(normalizeWakeText(''), defaultWakeText)
-  assert.equal(normalizeWakeText('   '), defaultWakeText)
-  assert.equal(normalizeWakeText(null), defaultWakeText)
-  assert.equal(normalizeWakeText(undefined), defaultWakeText)
+test('normalizeWakeText：空值保持为空，不造默认文案', () => {
+  assert.equal(normalizeWakeText(''), '')
+  assert.equal(normalizeWakeText('   '), '')
+  assert.equal(normalizeWakeText(null), '')
+  assert.equal(normalizeWakeText(undefined), '')
 })
 
 test('normalizeWakeText：去掉首尾空白，保留内部换行', () => {

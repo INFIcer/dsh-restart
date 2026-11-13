@@ -6,6 +6,7 @@ import {
   normalizeDelaySeconds,
   generateTaskId,
   taskSummary,
+  historyTaskSummary,
   cancelFeedbackText,
   normalizeTaskList,
 } from '../lib/scheduler.js'
@@ -161,6 +162,57 @@ test('触发载荷带上任务与会话（去重）', async () => {
   const payload = context.record.fire[0]
   assert.equal(payload.tasks.length, 3)
   assert.deepEqual(payload.sessionIds.sort(), ['s1', 's2'])
+})
+
+test('重启意图只留在活动任务上，不进入触发载荷与重启记录', async () => {
+  const context = makeScheduler()
+  const result = scheduleTask(context.scheduler, { wakeText: '记得装插件' })
+  assert.equal(result.task.wakeText, '记得装插件')
+  assert.equal(context.scheduler.tasks[0].wakeText, '记得装插件')
+
+  await context.scheduler.fire(0)
+
+  assert.equal(context.record.fire[0].tasks[0].wakeText, undefined)
+  assert.equal(context.scheduler.lastRestart.tasks[0].wakeText, undefined)
+  assert.equal(context.getDiskState().lastRestart.tasks[0].wakeText, undefined)
+})
+
+test('旧状态文件里的 wakeText 读取时忽略，不报错也不恢复', async () => {
+  const context = makeScheduler({
+    state: { tasks: [{ id: 'restart-old', sessionId: 's1', delaySeconds: 10, wakeText: '旧备忘' }] },
+  })
+  context.scheduler.init()
+  assert.equal(context.scheduler.tasks.length, 1)
+  assert.equal(context.scheduler.tasks[0].wakeText, '')
+
+  await context.scheduler.fire(0)
+
+  assert.equal(context.scheduler.lastRestart.tasks[0].wakeText, undefined)
+})
+
+test('旧状态文件里重启记录的 wakeText 读取时丢弃，下次落盘不再写回', () => {
+  const context = makeScheduler({
+    state: {
+      lastRestart: {
+        id: 'restart-run-old',
+        status: 'fire-failed',
+        tasks: [{ id: 'restart-old', delaySeconds: 10, wakeText: '旧备忘' }],
+      },
+    },
+  })
+  context.scheduler.init()
+
+  assert.equal(context.scheduler.lastRestart.tasks[0].wakeText, undefined)
+  assert.equal(context.getDiskState().lastRestart.tasks[0].wakeText, undefined)
+})
+
+test('historyTaskSummary 去掉重启意图，其余字段保留', () => {
+  const summary = taskSummary({ id: 'r1', sessionId: 's1', wakeText: '备忘', delaySeconds: 30, reason: '装插件' })
+  const history = historyTaskSummary({ id: 'r1', sessionId: 's1', wakeText: '备忘', delaySeconds: 30, reason: '装插件' })
+  assert.equal(summary.wakeText, '备忘')
+  assert.equal(history.wakeText, undefined)
+  assert.equal(history.reason, '装插件')
+  assert.equal(history.delaySeconds, 30)
 })
 
 test('触发重启：把插件设置快照信息带进 lastRestart 与落盘状态', async () => {
@@ -486,8 +538,6 @@ test('初始化：标记还是 launched 时继续轮询，等到 restarted 就�
   assert.equal(context.scheduler.lastRestart.ready, true)
   assert.equal(context.scheduler.bootRecord.marker, 'restarted')
   assert.equal(context.scheduler.bootRecord.confirmed, true)
-  // 确认成功必须补排开机汇报。
-  assert.equal(context.record.bootConfirmed.length, 1)
   assert.equal(context.timers.pendingCount(), 0)
 })
 
@@ -504,7 +554,6 @@ test('初始化：标记一直不变时超时后记为未确认', () => {
   assert.equal(context.scheduler.lastRestart.status, 'restarted-unconfirmed')
   assert.equal(context.scheduler.bootRecord.confirmed, false)
   assert.equal(context.timers.pendingCount(), 0)
-  assert.equal(context.record.bootConfirmed.length, 0)
 })
 
 test('初始化：没有标记时超时后记为 unknown', () => {

@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   buildWakeEvents,
+  buildWakePrompt,
   buildRestartScript,
   writeRestartScript,
   psQuote,
@@ -14,7 +15,7 @@ import {
   resolveScriptPaths,
   pluginRoot,
 } from '../lib/script.js'
-import { defaultWakeText, wakeDelaySeconds } from '../lib/constants.js'
+import { wakeDelaySeconds } from '../lib/constants.js'
 
 function tempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-restart-script-'))
@@ -24,22 +25,32 @@ function tempDir(t) {
   return dir
 }
 
-test('生成唤醒事件：按会话去重', () => {
-  const event = buildWakeEvents([
-    { sessionId: 's1', wakeText: '甲' },
-    { sessionId: 's1', wakeText: '乙' },
-    { sessionId: 's2', wakeText: '丙' },
-  ])
+test('生成唤醒事件：按会话去重，正文统一为重启完成', () => {
+  const event = buildWakeEvents(
+    [
+      { sessionId: 's1', wakeText: '甲' },
+      { sessionId: 's1', wakeText: '乙' },
+      { sessionId: 's2', wakeText: '丙' },
+    ],
+    { runId: 'restart-run-1' },
+  )
   assert.equal(event.length, 2)
   assert.deepEqual(event.map((item) => item.sessionId), ['s1', 's2'])
-  assert.equal(event[0].prompt, '甲')
+  assert.equal(event[0].prompt, 'DSH 已重启完成（运行记录 restart-run-1）。')
 })
 
-test('生成唤醒事件：没写唤醒文本用默认文本', () => {
+test('生成唤醒事件：正文不复述任务备忘', () => {
+  const [event] = buildWakeEvents([{ sessionId: 's1', wakeText: '记得装插件' }], { runId: 'run-9' })
+  assert.equal(event.prompt, 'DSH 已重启完成（运行记录 run-9）。')
+  assert.doesNotMatch(JSON.stringify(event), /记得装插件/)
+})
+
+test('生成唤醒事件：没有运行记录 id 时只报完成', () => {
   const [event] = buildWakeEvents([{ sessionId: 's1' }])
-  assert.equal(event.prompt, defaultWakeText)
+  assert.equal(event.prompt, 'DSH 已重启完成。')
   assert.equal(event.afterSeconds, wakeDelaySeconds)
   assert.equal(event.title, '重启完成唤醒')
+  assert.equal(buildWakePrompt(''), 'DSH 已重启完成。')
 })
 
 test('生成唤醒事件：丢掉没有会话 id 的项', () => {
