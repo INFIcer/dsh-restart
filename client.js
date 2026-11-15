@@ -8,13 +8,13 @@
 //  - 每 400ms 轮询宿主 /dsh-restart/state，画模态框 / 左下悬浮条 / 倒计时；
 //  - 有任务时自动展开，并 POST /dialog-open（宿主把 <5 秒的任务抬回 5 秒）；
 //  - 弹窗收起时在左侧栏底部留一条悬浮条，显示最短的剩余倒计时，点击再展开；
-//  - document 级 mousemove：节流 200ms 发 /pause；停止移动 1 秒发 /resume；
+//  - document 级输入事件（鼠标、键盘、滚轮、触摸）：节流 200ms 发 /pause；停止输入 1 秒发 /resume；
 //  - 每个任务一个「取消」按钮 → POST /cancel；任务清空时自动隐藏。
 
 const routePrefix = '/dsh-restart'
 const pollMs = 400
-const mouseThrottleMs = 200
-const mouseResumeMs = 1000
+const inputThrottleMs = 200
+const inputResumeMs = 1000
 const overlayId = 'dsr-overlay'
 const hintId = 'dsr-hint'
 const styleId = 'dsr-style'
@@ -246,7 +246,7 @@ function getHint() {
   return hint
 }
 
-/** 鼠标暂停：state.paused 为真或 phase 为 paused 时，所有任务的倒计时都停着。 */
+/** 输入暂停：state.paused 为真或 phase 为 paused 时，所有任务的倒计时都停着。 */
 function isPaused(state) {
   return state?.paused === true || String(state?.phase) === 'paused'
 }
@@ -266,13 +266,13 @@ function busyCountOf(state) {
 }
 
 /**
- * 倒计时停着的两个来源：还有会话在跑（排队等空闲）与鼠标在动。
+ * 倒计时停着的两个来源：还有会话在跑（排队等空闲）与用户有输入。
  * 界面上两者同等对待——同样写「已暂停」、同样用暂停色，只有原因说明不同。
- * 会话在跑优先：这时倒计时根本没在走，鼠标暂停与否都不影响剩余时间。
+ * 会话在跑优先：这时倒计时根本没在走，输入暂停与否都不影响剩余时间。
  */
 function pauseCause(state) {
   if (isHoldingForBusy(state)) return 'busy'
-  if (isPaused(state)) return 'pointer'
+  if (isPaused(state)) return 'input'
   return null
 }
 
@@ -285,8 +285,8 @@ function pauseTip(state) {
       ? `已暂停：还有 ${count} 个会话在跑，等它们都空闲后开始倒计时。`
       : '已暂停：还有会话在跑，等它们都空闲后开始倒计时。'
   }
-  if (cause === 'pointer') return '已暂停：鼠标在动时倒计时不走。'
-  return '鼠标在动时倒计时会暂停。'
+  if (cause === 'input') return '已暂停：有鼠标或键盘操作，倒计时停住。'
+  return '操作鼠标或键盘时，倒计时会暂停。'
 }
 
 /** 状态文案。暂停统一写「已暂停」，原因由 pauseTip 说明。 */
@@ -295,7 +295,7 @@ function phaseText(state) {
   if (phase === 'firing') return '正在重启…'
   const cause = pauseCause(state)
   if (cause === 'busy') return '已暂停（等待会话空闲）'
-  if (cause === 'pointer' || phase === 'paused') return '已暂停'
+  if (cause === 'input' || phase === 'paused') return '已暂停'
   if (phase === 'countdown') return '倒计时中'
   return '空闲'
 }
@@ -649,7 +649,7 @@ function formatCountdown(remainingMs) {
 }
 
 /**
- * 悬浮条文案。暂停说「已暂停」，不写「挂起」；鼠标在动和会话在跑都算暂停，文案一致。
+ * 悬浮条文案。暂停说「已暂停」，不写「挂起」；有输入和会话在跑都算暂停，文案一致。
  * 还没开始倒计时时没有剩余时间，用「等待会话空闲」代替时间。
  */
 function hintText(task, paused) {
@@ -748,21 +748,30 @@ function startPolling() {
   }, pollMs)
 }
 
-// ———————————————————————— 鼠标暂停 ————————————————————————
+// ———————————————————————— 输入暂停 ————————————————————————
 
 let lastPauseRequestAt = 0
 let resumeTimer = null
+
+/**
+ * 算作用户输入的事件：鼠标移动、鼠标按键、滚轮、触摸。键盘单独挂 onKeyDown，
+ * 因为它还要处理 Esc。任何一种输入都说明人在用 DSH，这时重启不该在背后发生。
+ */
+const activityEventNames = ['mousemove', 'mousedown', 'wheel', 'touchstart', 'touchmove']
 
 function hasRunningTasks() {
   const snapshot = ui.lastSnapshot
   return Boolean(snapshot && Array.isArray(snapshot.tasks) && snapshot.tasks.length > 0)
 }
 
-function onMouseMove() {
+/**
+ * 任何输入都走这里：节流发 /pause，停止输入 1 秒后发 /resume。
+ * 暂停在宿主侧生效（真的不减剩余时间），所以这里只负责发信号。
+ */
+function onUserActivity() {
   if (!hasRunningTasks()) return
   const now = Date.now()
-  // 暂停状态在宿主侧生效（真的不减剩余时间），客户端每 200ms 才发一次。
-  if (now - lastPauseRequestAt >= mouseThrottleMs) {
+  if (now - lastPauseRequestAt >= inputThrottleMs) {
     lastPauseRequestAt = now
     void request('/pause', { method: 'POST' })
   }
@@ -772,7 +781,7 @@ function onMouseMove() {
     void request('/resume', { method: 'POST' }).then(() => {
       void pollOnce()
     })
-  }, mouseResumeMs)
+  }, inputResumeMs)
 }
 
 function onBlur() {
@@ -784,20 +793,28 @@ function onBlur() {
   void request('/resume', { method: 'POST' })
 }
 
-/** Esc 兜底：弹窗开着时按 Esc 就收起，焦点在页面任何位置都生效。 */
+/**
+ * 键盘输入同样算活动；另外负责 Esc 兜底：弹窗开着时按 Esc 就收起，
+ * 焦点在页面任何位置都生效。
+ */
 function onKeyDown(event) {
+  onUserActivity()
   if (!ui.open) return
   if (event?.key !== 'Escape' && event?.key !== 'Esc') return
   collapse()
 }
 
 /** 返回卸载函数：dispose 时必须摘掉挂在 document/window 上的监听，否则重装会叠加多份。 */
-function mountMouseListeners() {
-  document.addEventListener('mousemove', onMouseMove, { passive: true })
+function mountActivityListeners() {
+  for (const eventName of activityEventNames) {
+    document.addEventListener(eventName, onUserActivity, { passive: true })
+  }
   document.addEventListener('keydown', onKeyDown)
   window.addEventListener('blur', onBlur)
-  return function unmountMouseListeners() {
-    document.removeEventListener('mousemove', onMouseMove, { passive: true })
+  return function unmountActivityListeners() {
+    for (const eventName of activityEventNames) {
+      document.removeEventListener(eventName, onUserActivity, { passive: true })
+    }
     document.removeEventListener('keydown', onKeyDown)
     window.removeEventListener('blur', onBlur)
   }
@@ -820,7 +837,7 @@ function apply(ctx) {
       event.preventDefault()
       expand(ui.lastSnapshot)
     })
-    const unmountMouseListeners = mountMouseListeners()
+    const unmountActivityListeners = mountActivityListeners()
     startPolling()
 
     // 设置项只能注册到 DSH 的插件页槽位；主界面仍然不占任何槽位。
@@ -862,7 +879,7 @@ function apply(ctx) {
               resumeTimer = null
               if (ui.nowConfirmTimer) clearTimeout(ui.nowConfirmTimer)
               ui.nowConfirmTimer = null
-              unmountMouseListeners()
+              unmountActivityListeners()
               if (typeof disposeSlots === 'function') {
                 try { disposeSlots() } catch { /* 已卸载 */ }
                 disposeSlots = null

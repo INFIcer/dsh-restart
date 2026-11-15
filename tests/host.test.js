@@ -400,7 +400,7 @@ test('工具 status：列出多个任务，不回显备注', async (t) => {
 test('工具 status：显示暂停状态', async (t) => {
   const { ctx, plugin } = makePlugin(t)
   await getTool(ctx).execute({ action: 'schedule', delaySeconds: 10 }, { agent: { session: { id: 'session-a' } } })
-  plugin.scheduler.pause('mouse')
+  plugin.scheduler.pause('input')
   const result = await getTool(ctx).execute({ action: 'status' })
   assert.equal(result.paused, true)
 })

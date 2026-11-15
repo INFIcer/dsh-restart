@@ -45,7 +45,7 @@ test('还有会话在跑时不弹窗：只留悬浮条，点开后才画得出�
   // 等会话空闲期间不弹窗，只在左下角提示，别挡住正在干活的人。
   assert.equal(overlay.hidden, true)
   assert.equal(hint.hidden, false)
-  // 等待会话空闲也算暂停：悬浮条与鼠标暂停同一种写法、同一个暂停色。
+  // 等待会话空闲也算暂停：悬浮条与输入暂停同一种写法、同一个暂停色。
   assert.equal(hint.children[1].textContent, 'DSH 重启 · 已暂停 · 等待会话空闲')
   assert.equal(hint.classList.contains('dsr-paused'), true)
 
@@ -84,6 +84,8 @@ test('倒计时途中会话变忙：倒计时停住，面板与悬浮条都改�
   assert.equal(overlay.hidden, false)
   const badge = findNode(overlay, (node) => node.className === 'dsr-phase')
   assert.equal(badge.textContent, '倒计时中')
+  const runningTip = findNode(overlay, (node) => node.className === 'dsr-tip')
+  assert.equal(runningTip.textContent, '操作鼠标或键盘时，倒计时会暂停。')
 
   // 有会话开始跑 → 宿主把 phase 打回 waiting，剩余时间冻结不动。
   state.phase = 'waiting'
@@ -112,7 +114,7 @@ test('倒计时途中会话变忙：倒计时停住，面板与悬浮条都改�
   unmount()
 })
 
-test('鼠标暂停：面板徽标、说明与悬浮条都用同一套暂停写法', async () => {
+test('输入暂停：面板徽标、说明与悬浮条都用同一套暂停写法', async () => {
   const page = makePage()
   const state = makeState([makeTask({ remainingMs: 9000 })])
   const unmount = await mount(page, async (url) => responseFor(String(url).endsWith('/state') ? state : { ok: true }))
@@ -125,7 +127,7 @@ test('鼠标暂停：面板徽标、说明与悬浮条都用同一套暂停写�
   const badge = findNode(overlay, (node) => node.className === 'dsr-phase')
   assert.equal(badge.textContent, '已暂停')
   const tip = findNode(overlay, (node) => node.className === 'dsr-tip')
-  assert.equal(tip.textContent, '已暂停：鼠标在动时倒计时不走。')
+  assert.equal(tip.textContent, '已暂停：有鼠标或键盘操作，倒计时停住。')
 
   const collapseButton = findNode(overlay, (node) => node.labelName === 'button' && node.textContent === '收起')
   collapseButton.listeners.click[0]()
