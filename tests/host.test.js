@@ -283,6 +283,19 @@ test('路由 /now：有任务时立刻触发并回空快照', async (t) => {
   assert.equal(body.snapshot.tasks.length, 0)
 })
 
+test('路由 /now：还有会话在跑时回 409 busy，不触发重启', async (t) => {
+  const ctx = makeFakeCtx({ sessionStates: [['session-a', 'running']] })
+  const { plugin } = makePlugin(t, { ctx })
+  plugin.scheduler.scheduleTask({ sessionId: 'session-a', delaySeconds: 600, reason: '按钮测试' })
+  const res = await callRoute(ctx, '/now', fakeRequest('POST'))
+  assert.equal(res.statusCode, 409)
+  const body = JSON.parse(res.body)
+  assert.equal(body.ok, false)
+  assert.equal(body.code, 'busy')
+  assert.equal(body.busyCount, 1)
+  assert.equal(plugin.scheduler.tasks.length, 1)
+})
+
 test('装配：注册 dsh_restart 工具', (t) => {  const { ctx } = makePlugin(t)
   const tool = getTool(ctx)
   assert.notEqual(tool, undefined)

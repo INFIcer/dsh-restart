@@ -741,12 +741,22 @@ test('坏会话数据不会让调度器崩', async () => {
   assert.equal(context.scheduler.tasks[0].remainingMs, 10000)
 })
 
-test('立即重启：有会话在跑也直接触发，不等空闲与倒计时', async () => {
+test('立即重启：有会话在跑时拒绝，会话空闲后才放行', async () => {
   const context = makeScheduler()
   setBusy(context, ['session-a'])
   scheduleTask(context.scheduler, { sessionId: 'session-a' })
   await context.scheduler.tick()
   assert.equal(context.scheduler.phase, 'waiting')
+
+  const refused = await context.scheduler.restartNow()
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'busy')
+  assert.equal(refused.busyCount, 1)
+  assert.equal(context.record.fire.length, 0)
+  assert.equal(context.scheduler.tasks.length, 1)
+  assert.equal(context.scheduler.phase, 'waiting')
+
+  setBusy(context, [])
   const result = await context.scheduler.restartNow()
   assert.equal(result.ok, true)
   assert.equal(result.immediate, true)

@@ -250,6 +250,20 @@ function isPaused(state) {
   return state?.paused === true || String(state?.phase) === 'paused'
 }
 
+/**
+ * 是否因为还有会话在跑而停在等待。这时既不倒计时也不该打扰人：只排队，不弹窗
+ * （挡着正在干活的窗口），也不允许「立即重启」（会掐掉正在跑的回合）。
+ */
+function isHoldingForBusy(state) {
+  if (String(state?.phase || '') === 'waiting') return true
+  return (Number(state?.busyCount) || 0) > 0
+}
+
+/** 快照里的忙碌会话数；坏数据按 0 处理。 */
+function busyCountOf(state) {
+  return Math.max(0, Number(state?.busyCount) || 0)
+}
+
 /** 状态文案。 */
 function phaseText(state) {
   const phase = String(state?.phase || 'idle')
@@ -295,6 +309,11 @@ const ui = {
   /** 上一次快照，用于判断任务从无到有 */
   lastSnapshot: null,
   lastTaskCount: 0,
+  /**
+   * 这一批任务还没自动弹过窗。任务出现时先记上，等真开始倒计时（不再有会话在跑）
+   * 才兑现；用户自己开过或收过窗就作废，免得他刚关掉又被弹回来。
+   */
+  autoOpenPending: false,
   /** 是否已经为这一批任务发过 dialog-open */
   raisedRequested: false,
   /** 正在取消中的任务 id，避免重复点 */
@@ -311,6 +330,8 @@ const ui = {
 
 function collapse() {
   ui.open = false
+  // 用户自己收起，就作废本批的自动展开。
+  ui.autoOpenPending = false
   const overlay = document.getElementById(overlayId)
   if (overlay) overlay.hidden = true
   // 收起后立刻恢复悬浮条，不用等下一拍轮询。
@@ -332,8 +353,8 @@ function buildCard(state) {
     'div',
     'dsr-tip',
     isPaused(state)
-      ? '已暂停：鼠标在动时倒计时不走，停下 1 秒后自动继续。'
-      : '鼠标一移动，所有倒计时都会暂停；停 1 秒后自动恢复。',
+      ? '已暂停：鼠标在动时倒计时不走。'
+      : '鼠标在动时倒计时会暂停。',
   )
   card.appendChild(tip)
 
@@ -384,16 +405,21 @@ function buildCard(state) {
   foot.appendChild(makeEl('span', null, ui.error || '每个任务都能单独取消；取消会给你发一条反馈。'))
   const spacer = makeEl('span', 'dsr-spacer')
   foot.appendChild(spacer)
+  const holding = isHoldingForBusy(state)
+  const busyCount = busyCountOf(state)
   const nowButton = makeEl(
     'button',
     'dsr-btn dsr-danger',
     ui.nowRunning ? '重启中…' : ui.nowConfirm ? '再点一次：立即重启' : '立即重启',
   )
   nowButton.type = 'button'
-  nowButton.disabled = ui.nowRunning
-  nowButton.title = '跳过等待和倒计时，马上重启；会中断正在运行的会话，重启后会话会被唤醒。'
+  // 还有会话在跑时按钮不可点：宿主那边也会拒绝，这里先把入口关掉，别让人点进错误里。
+  nowButton.disabled = ui.nowRunning || holding
+  nowButton.title = holding
+    ? (busyCount > 0 ? '还有 ' + busyCount + ' 个会话在跑' : '还有会话在跑') + '，等它们都空闲后才能立即重启'
+    : '跳过等待和倒计时，马上重启；请先保存正在编辑的内容'
   nowButton.addEventListener('click', () => {
-    if (ui.nowRunning) return
+    if (ui.nowRunning || holding) return
     if (!ui.nowConfirm) {
       ui.nowConfirm = true
       if (ui.nowConfirmTimer) clearTimeout(ui.nowConfirmTimer)
@@ -483,6 +509,8 @@ function openFromSnapshot(snapshot) {
     render(snapshot)
     return
   }
+  // 面板已经露过一次面，这一批就不再自动弹。
+  ui.autoOpenPending = false
   if (!showOverlay(snapshot)) return
   // 打开瞬间请宿主把不足 5 秒的任务抬回 5 秒（每次都请求，宿主自己幂等）。
   void request('/dialog-open', { method: 'POST' }).then((result) => {
@@ -520,19 +548,26 @@ function render(state) {
     ui.open = false
     ui.lastTaskCount = 0
     ui.raisedRequested = false
+    ui.autoOpenPending = false
     renderHint(state, false)
     return
   }
 
-  if (ui.lastTaskCount === 0 && !ui.open) {
-    // 任务从无到有：自动展开；展开失败会保持收起，由悬浮条给出错误与重试入口。
-    expand(state)
-    return
-  }
+  // 任务从无到有：先记下「这一批还没自动弹过」，但此刻可能还有会话在跑，不能马上弹。
+  if (ui.lastTaskCount === 0) ui.autoOpenPending = true
   ui.lastTaskCount = tasks.length
   // 弹窗收起时用左下悬浮条显示最短的剩余倒计时；展开时让位给弹窗。
   renderHint(state, ui.open)
-  if (ui.open) showOverlay(state)
+  if (ui.open) {
+    showOverlay(state)
+    return
+  }
+  if (!ui.autoOpenPending) return
+  // 只在真正开始倒计时后才自动展开一次：等待中的任务只留悬浮条，不挡人。
+  // 展开失败会清空 lastTaskCount，下一拍当成「任务从无到有」重试。
+  if (isHoldingForBusy(state)) return
+  ui.autoOpenPending = false
+  expand(state)
 }
 
 // ———————————————————————— 悬浮条 ————————————————————————
@@ -815,6 +850,7 @@ function apply(ctx) {
               ui.open = false
               ui.lastSnapshot = null
               ui.lastTaskCount = 0
+              ui.autoOpenPending = false
               ui.raisedRequested = false
               ui.cancelling.clear()
               ui.nowConfirm = false
