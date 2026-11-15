@@ -45,23 +45,93 @@ test('还有会话在跑时不弹窗：只留悬浮条，点开后才画得出�
   // 等会话空闲期间不弹窗，只在左下角提示，别挡住正在干活的人。
   assert.equal(overlay.hidden, true)
   assert.equal(hint.hidden, false)
-  assert.match(hint.textContent, /等待会话空闲/)
+  // 等待会话空闲也算暂停：悬浮条与鼠标暂停同一种写法、同一个暂停色。
+  assert.equal(hint.children[1].textContent, 'DSH 重启 · 已暂停 · 等待会话空闲')
+  assert.equal(hint.classList.contains('dsr-paused'), true)
 
-  // 手动点开才画卡片；等待中的任务画法本身不变（remainingMs 为 null 不抛错）。
+  // 手动点开才画卡片；等待中的任务按暂停态画（remainingMs 为 null 不抛错）。
   hint.listeners.click[0]()
   await sleep(30)
   assert.equal(overlay.hidden, false)
   const card = findNode(overlay, (node) => node.className === 'dsr-card')
   assert.ok(card)
+  const badge = findNode(card, (node) => node.className === 'dsr-phase')
+  assert.equal(badge.textContent, '已暂停（等待会话空闲）')
+  assert.equal(badge.classList.contains('dsr-warn'), true)
+  const tip = findNode(card, (node) => node.className === 'dsr-tip')
+  assert.equal(tip.textContent, '已暂停：还有 2 个会话在跑，等它们都空闲后开始倒计时。')
   const waitingCell = findNode(card, (node) => String(node.className).includes('dsr-waiting'))
   assert.ok(waitingCell)
-  assert.equal(waitingCell.textContent, '等待中')
+  assert.equal(waitingCell.textContent, '已暂停')
+  assert.ok(String(waitingCell.className).includes('dsr-paused'), '等待中的暂停也要用暂停色')
 
   // 还有会话在跑时「立即重启」必须不可点，并说明原因。
   const nowButton = findNode(card, (node) => node.labelName === 'button' && node.textContent === '立即重启')
   assert.ok(nowButton)
   assert.equal(nowButton.disabled, true)
   assert.match(nowButton.title, /2 个会话在跑/)
+
+  unmount()
+})
+
+test('倒计时途中会话变忙：倒计时停住，面板与悬浮条都改写成已暂停', async () => {
+  const page = makePage()
+  const state = makeState([makeTask({ remainingMs: 12000 })])
+  const unmount = await mount(page, async (url) => responseFor(String(url).endsWith('/state') ? state : { ok: true }))
+
+  const overlay = overlayOf(page)
+  const hint = hintOf(page)
+  assert.equal(overlay.hidden, false)
+  const badge = findNode(overlay, (node) => node.className === 'dsr-phase')
+  assert.equal(badge.textContent, '倒计时中')
+
+  // 有会话开始跑 → 宿主把 phase 打回 waiting，剩余时间冻结不动。
+  state.phase = 'waiting'
+  state.busyCount = 1
+  await sleep(500)
+  // 重新查节点：每次渲染都会重建卡片，之前抓到的引用已经脱离文档。
+  const pausedBadge = findNode(overlay, (node) => node.className === 'dsr-phase')
+  assert.equal(pausedBadge.textContent, '已暂停（等待会话空闲）')
+  assert.equal(pausedBadge.classList.contains('dsr-warn'), true)
+  const tip = findNode(overlay, (node) => node.className === 'dsr-tip')
+  assert.equal(tip.textContent, '已暂停：还有 1 个会话在跑，等它们都空闲后开始倒计时。')
+  const secondsCell = findNode(overlay, (node) => node.className === 'dsr-sec dsr-paused')
+  assert.ok(secondsCell)
+  assert.equal(secondsCell.textContent, '12 秒')
+  // 秒数旁边补一句「已暂停」：颜色之外再给一个文字标记。
+  assert.ok(findNode(overlay, (node) => node.textContent === '已暂停' && node.className === 'dsr-session'))
+
+  // 收起后用悬浮条看：同样写已暂停，并写明还在等会话。
+  const collapseButton = findNode(overlay, (node) => node.labelName === 'button' && node.textContent === '收起')
+  collapseButton.listeners.click[0]()
+  await sleep(500)
+  assert.equal(hint.hidden, false)
+  assert.equal(hint.children[1].textContent, 'DSH 重启 · 已暂停 00:12')
+  assert.equal(hint.classList.contains('dsr-paused'), true)
+
+  unmount()
+})
+
+test('鼠标暂停：面板徽标、说明与悬浮条都用同一套暂停写法', async () => {
+  const page = makePage()
+  const state = makeState([makeTask({ remainingMs: 9000 })])
+  const unmount = await mount(page, async (url) => responseFor(String(url).endsWith('/state') ? state : { ok: true }))
+
+  const overlay = overlayOf(page)
+  const hint = hintOf(page)
+  state.paused = true
+  state.phase = 'paused'
+  await sleep(500)
+  const badge = findNode(overlay, (node) => node.className === 'dsr-phase')
+  assert.equal(badge.textContent, '已暂停')
+  const tip = findNode(overlay, (node) => node.className === 'dsr-tip')
+  assert.equal(tip.textContent, '已暂停：鼠标在动时倒计时不走。')
+
+  const collapseButton = findNode(overlay, (node) => node.labelName === 'button' && node.textContent === '收起')
+  collapseButton.listeners.click[0]()
+  await sleep(500)
+  assert.equal(hint.children[1].textContent, 'DSH 重启 · 已暂停 00:09')
+  assert.equal(hint.classList.contains('dsr-paused'), true)
 
   unmount()
 })

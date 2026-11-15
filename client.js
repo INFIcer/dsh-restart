@@ -19,7 +19,7 @@ const overlayId = 'dsr-overlay'
 const hintId = 'dsr-hint'
 const styleId = 'dsr-style'
 
-// 任务还没开始倒计时（宿主在等所有会话空闲）时，剩余时间那一列显示的文字。
+// 任务还没开始倒计时时，剩余时间那一列显示的文字。因等待会话空闲而暂停时改显示「已暂停」。
 const waitingText = '等待中'
 
 // 悬浮条钉在左侧栏底部、用户头像行上方的那块空白里：左侧栏约 257px 宽、底部头像行约 44px 高，
@@ -193,6 +193,7 @@ function injectStyles() {
 #${overlayId} .dsr-sec{font-variant-numeric:tabular-nums;font-size:18px;font-weight:600;color:#7ee0a8;white-space:nowrap;}
 #${overlayId} .dsr-sec.dsr-paused{color:#ffcf7a;}
 #${overlayId} .dsr-sec.dsr-waiting{font-size:13px;color:#9aa4b6;font-weight:500;}
+#${overlayId} .dsr-sec.dsr-waiting.dsr-paused{color:#ffcf7a;}
 #${overlayId} .dsr-btn{cursor:pointer;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#e8eaf0;
   border-radius:8px;padding:5px 10px;font-size:12px;white-space:nowrap;}
 #${overlayId} .dsr-btn:hover{background:rgba(255,255,255,.12);}
@@ -245,7 +246,7 @@ function getHint() {
   return hint
 }
 
-/** 暂停是全局的：state.paused 为真或 phase 为 paused 时，所有任务的倒计时都停着。 */
+/** 鼠标暂停：state.paused 为真或 phase 为 paused 时，所有任务的倒计时都停着。 */
 function isPaused(state) {
   return state?.paused === true || String(state?.phase) === 'paused'
 }
@@ -264,21 +265,50 @@ function busyCountOf(state) {
   return Math.max(0, Number(state?.busyCount) || 0)
 }
 
-/** 状态文案。 */
+/**
+ * 倒计时停着的两个来源：还有会话在跑（排队等空闲）与鼠标在动。
+ * 界面上两者同等对待——同样写「已暂停」、同样用暂停色，只有原因说明不同。
+ * 会话在跑优先：这时倒计时根本没在走，鼠标暂停与否都不影响剩余时间。
+ */
+function pauseCause(state) {
+  if (isHoldingForBusy(state)) return 'busy'
+  if (isPaused(state)) return 'pointer'
+  return null
+}
+
+/** 暂停说明的完整句子：写清为什么停。弹窗顶部那行共用它。 */
+function pauseTip(state) {
+  const cause = pauseCause(state)
+  if (cause === 'busy') {
+    const count = busyCountOf(state)
+    return count > 0
+      ? `已暂停：还有 ${count} 个会话在跑，等它们都空闲后开始倒计时。`
+      : '已暂停：还有会话在跑，等它们都空闲后开始倒计时。'
+  }
+  if (cause === 'pointer') return '已暂停：鼠标在动时倒计时不走。'
+  return '鼠标在动时倒计时会暂停。'
+}
+
+/** 状态文案。暂停统一写「已暂停」，原因由 pauseTip 说明。 */
 function phaseText(state) {
   const phase = String(state?.phase || 'idle')
-  if (phase === 'waiting') return `等待中（还有 ${Number(state?.busyCount) || 0} 个会话在跑）`
-  if (phase === 'countdown') return `倒计时中${state?.paused ? '（已暂停）' : ''}`
-  if (phase === 'paused') return '已暂停'
   if (phase === 'firing') return '正在重启…'
+  const cause = pauseCause(state)
+  if (cause === 'busy') return '已暂停（等待会话空闲）'
+  if (cause === 'pointer' || phase === 'paused') return '已暂停'
+  if (phase === 'countdown') return '倒计时中'
   return '空闲'
 }
 
 function remainingText(task, state) {
-  if (!task || task.remainingMs == null) return { text: waitingText, cssClass: 'dsr-waiting' }
+  const cause = pauseCause(state)
+  if (!task || task.remainingMs == null) {
+    return cause
+      ? { text: '已暂停', cssClass: 'dsr-waiting dsr-paused' }
+      : { text: waitingText, cssClass: 'dsr-waiting' }
+  }
   const seconds = Math.max(0, Math.ceil(Number(task.remainingMs) / 1000))
-  const pause = state?.paused === true || String(state?.phase) === 'paused'
-  return { text: `${seconds} 秒`, cssClass: pause ? 'dsr-paused' : '' }
+  return { text: `${seconds} 秒`, cssClass: cause ? 'dsr-paused' : '' }
 }
 
 // ———————————————————————— 与宿主通信 ————————————————————————
@@ -345,17 +375,11 @@ function buildCard(state) {
   const head = makeEl('div', 'dsr-head')
   head.appendChild(makeEl('div', 'dsr-title', 'DSH 重启倒计时'))
   const phase = makeEl('div', 'dsr-phase', phaseText(state))
-  if (isPaused(state)) phase.classList.add('dsr-warn')
+  if (pauseCause(state)) phase.classList.add('dsr-warn')
   head.appendChild(phase)
   card.appendChild(head)
 
-  const tip = makeEl(
-    'div',
-    'dsr-tip',
-    isPaused(state)
-      ? '已暂停：鼠标在动时倒计时不走。'
-      : '鼠标在动时倒计时会暂停。',
-  )
+  const tip = makeEl('div', 'dsr-tip', pauseTip(state))
   card.appendChild(tip)
 
   const list = makeEl('ul', 'dsr-list')
@@ -377,7 +401,7 @@ function buildCard(state) {
     const remaining = remainingText(task, state)
     const seconds = makeEl('div', `dsr-sec ${remaining.cssClass}`.trim(), remaining.text)
     row.appendChild(seconds)
-    if (isPaused(state)) {
+    if (pauseCause(state) && task.remainingMs != null) {
       row.appendChild(makeEl('span', 'dsr-session', '已暂停'))
     }
 
@@ -625,7 +649,7 @@ function formatCountdown(remainingMs) {
 }
 
 /**
- * 悬浮条文案。暂停说「已暂停」，不写「挂起」。
+ * 悬浮条文案。暂停说「已暂停」，不写「挂起」；鼠标在动和会话在跑都算暂停，文案一致。
  * 还没开始倒计时时没有剩余时间，用「等待会话空闲」代替时间。
  */
 function hintText(task, paused) {
@@ -655,7 +679,7 @@ function renderHint(state, open) {
     ui.hintPaused = null
     return
   }
-  const paused = isPaused(state)
+  const paused = pauseCause(state) !== null
   const text = hintText(task, paused)
   hint.hidden = false
   if (ui.hintText !== text || ui.hintPaused !== paused) {
