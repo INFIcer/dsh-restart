@@ -19,8 +19,8 @@
 
 需要 Windows、DSH 桌面版。
 
-1. 把本目录放到任意位置（例如 `E:\dsh-restart-plugin`）。
-2. 打开 `C:\Users\<你的用户名>\.dsh\profiles\desktop\package.json`，在 `dependencies` 里加一行 `"dsh-restart-plugin": "link:E:/dsh-restart-plugin"`，在 `dsh.profile.bundles` 数组里加一项 `"dsh-restart-plugin"`。
+1. 把本目录放到任意位置（例如 `E:\dsh-restart`）。
+2. 打开 `C:\Users\<你的用户名>\.dsh\profiles\desktop\package.json`，在 `dependencies` 里加一行 `"dsh-restart": "link:E:/dsh-restart-plugin"`，在 `dsh.profile.bundles` 数组里加一项 `"dsh-restart"`。
 3. 重启一次 DSH 生效。
 
 目录里没有 `node_modules`，也不需要安装依赖。

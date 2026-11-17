@@ -1,6 +1,6 @@
-# dsh-restart-plugin：DSH 重启调度
+# dsh-restart：DSH 重启调度
 # 这一层只负责把插件插进 profile；运行状态在 C:\Users\Administrator\.dsh\restart-scheduler.json。
 # 系统提示服务（systemPrompt）不进 inject：运行时用 ctx.get 可选读取，缺了只降级，不让插件挂起。
 - insert:
-    - id: dsh-restart-plugin
-      name: 'dsh-restart-plugin'
+    - id: dsh-restart
+      name: 'dsh-restart'

@@ -11,8 +11,8 @@ import { scheduledTaskName } from '../lib/constants.js'
 import { makeFakeSpawn } from './helpers.js'
 
 test('构造任务命令行：普通路径不加引号', () => {
-  const row = buildTaskCommand('E:\\dsh-restart-plugin\\restart.ps1')
-  assert.match(row, /^powershell\.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File E:\\dsh-restart-plugin\\restart\.ps1$/)
+  const row = buildTaskCommand('E:\\dsh-restart\\restart.ps1')
+  assert.match(row, /^powershell\.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File E:\\dsh-restart\\restart\.ps1$/)
   assert.doesNotMatch(row, /"/)
 })
 
@@ -63,7 +63,7 @@ test('构造计划任务参数：可自定义任务名', () => {
 
 test('启动脱离重启：两次 schtasks 都成功', async () => {
   const spawnImpl = makeFakeSpawn([{ code: 0 }, { code: 0 }])
-  const result = await launchDetachedRestart({ scriptPath: 'E:\\dsh-restart-plugin\\restart.ps1', spawnImpl })
+  const result = await launchDetachedRestart({ scriptPath: 'E:\\dsh-restart\\restart.ps1', spawnImpl })
   assert.equal(result.ok, true)
   assert.equal(result.launcher, 'schtasks')
   assert.equal(result.taskName, scheduledTaskName)

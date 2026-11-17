@@ -101,7 +101,7 @@ export function makePage() {
     },
     __ModuleLoader__: {
       load({ id, factory }) {
-        assert.equal(id, 'dsh-restart-plugin')
+        assert.equal(id, 'dsh-restart')
         registeredModule = factory()
       },
     },

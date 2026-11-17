@@ -27,7 +27,7 @@ test('client：apply 挂全局监听，dispose 后全部摘掉并可干净重装
   const page = makePage()
   const counter = { value: 0 }
   const mod = startClient(page, idleFetch(counter))
-  assert.equal(mod.name, 'dsh-restart-plugin')
+  assert.equal(mod.name, 'dsh-restart')
   assert.ok(Array.isArray(mod.inject))
 
   const cleanup = []

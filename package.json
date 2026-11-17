@@ -1,5 +1,5 @@
 {
-  "name": "dsh-restart-plugin",
+  "name": "dsh-restart",
   "version": "0.1.0",
   "description": "DSH 重启调度插件：多会话排期、全部会话空闲后倒计时、有输入就暂停、面板取消并反馈、重启后自动唤醒。零外部依赖。",
   "license": "MIT",
@@ -9,7 +9,8 @@
   "exports": {
     ".": "./lib/host.js",
     "./client": "./client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "engines": {
     "node": ">=20"

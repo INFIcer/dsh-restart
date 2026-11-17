@@ -516,7 +516,7 @@ function showOverlay(state) {
     if (lastPaintError !== message) {
       lastPaintError = message
       try {
-        console.warn('[dsh-restart-plugin] 重启面板绘制失败（已收起，等待重试）:', error)
+        console.warn('[dsh-restart] 重启面板绘制失败（已收起，等待重试）:', error)
       } catch {
         /* 忽略 */
       }
@@ -860,7 +860,7 @@ function apply(ctx) {
       }
     } catch (error) {
       try {
-        console.warn('[dsh-restart-plugin] 注册设置项失败（已忽略）:', error)
+        console.warn('[dsh-restart] 注册设置项失败（已忽略）:', error)
       } catch {
         /* 忽略 */
       }
@@ -904,7 +904,7 @@ function apply(ctx) {
               /* 忽略 */
             }
           },
-          'dsh-restart-plugin-client: dispose',
+          'dsh-restart-client: dispose',
         )
       }
     } catch {
@@ -912,7 +912,7 @@ function apply(ctx) {
     }
   } catch (error) {
     try {
-      console.warn('[dsh-restart-plugin] 客户端界面加载失败（已忽略）:', error)
+      console.warn('[dsh-restart] 客户端界面加载失败（已忽略）:', error)
     } catch {
       /* 忽略 */
     }
@@ -927,14 +927,14 @@ var inject = ['slots']
 const mod = { exports: {} }
 mod.exports.apply = apply
 mod.exports.inject = inject
-mod.exports.name = 'dsh-restart-plugin'
+mod.exports.name = 'dsh-restart'
 // 纯函数导出：单测直接调用；浏览器里没有别的消费方。
 mod.exports.hint = { pickShortestTask, formatCountdown, hintText, hintTitle }
 
 try {
   if (typeof window !== 'undefined' && window.__ModuleLoader__ && typeof window.__ModuleLoader__.load === 'function') {
     window.__ModuleLoader__.load({
-      id: 'dsh-restart-plugin',
+      id: 'dsh-restart',
       factory: (require) => {
         try {
           dsrReact = require('react')
@@ -947,7 +947,7 @@ try {
   }
 } catch (error) {
   try {
-    console.warn('[dsh-restart-plugin] 注册客户端模块失败:', error)
+    console.warn('[dsh-restart] 注册客户端模块失败:', error)
   } catch {
     /* 忽略 */
   }

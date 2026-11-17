@@ -22,7 +22,7 @@ import {
 } from '../lib/plugin-state.js'
 
 function tempDir(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-restart-plugin-state-'))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-restart-state-'))
   t.after(() => {
     try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* 忽略 */ }
   })
@@ -293,7 +293,7 @@ function makeCandidate(root, name, options = {}) {
   if (options.pluginRoot) {
     const modules = path.join(dir, 'node_modules')
     fs.mkdirSync(modules, { recursive: true })
-    fs.symlinkSync(options.pluginRoot, path.join(modules, 'dsh-restart-plugin'), 'junction')
+    fs.symlinkSync(options.pluginRoot, path.join(modules, 'dsh-restart'), 'junction')
   }
   return dir
 }

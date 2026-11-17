@@ -475,7 +475,7 @@ test('初始化：旧版中文键状态文件仍能恢复任务', () => {
   const context = makeScheduler({
     state: {
       version: undefined,
-      插件: 'dsh-restart-plugin',
+      插件: 'dsh-restart',
       版本: 1,
       tasks: [{ id: 'restart-a', sessionId: 's1', delaySeconds: 30 }],
       lastRestart: { id: 'r1', status: 'restarted', 已汇报: true, 唤醒事件数: 2, 触发方式: 'schtasks' },
